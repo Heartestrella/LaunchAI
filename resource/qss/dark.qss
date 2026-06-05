@@ -1,0 +1,9 @@
+/* dark.qss - 暗色主题 */
+FramelessWindow, QWidget {
+    background-color: #1e1e1e;
+}
+
+SettingCardGroup {
+    background-color: #2d2d2d;
+    border-radius: 8px;
+}

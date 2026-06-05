@@ -1,0 +1,9 @@
+/* light.qss - 亮色主题 */
+FramelessWindow, QWidget {
+    background-color: #f5f5f5;  /* 必须明确设置背景色，不能透明 */
+}
+
+SettingCardGroup {
+    background-color: white;
+    border-radius: 8px;
+}
