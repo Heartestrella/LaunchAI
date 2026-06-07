@@ -547,7 +547,7 @@ else:
                 self.commands = [PYTHON_PATH, "-m", "pip",
                                  "install", project_root, ]
                 return self.commands
-        self.output_signal(self._html("从GITHUB安装失败 回滚默认PIP安装", "red"))
+        self.output_signal.emit(self._html("从GITHUB安装失败 回滚默认PIP安装", "red"))
         return [PYTHON_PATH, "-m", "pip", "install", self.package_name[0], ]  # 回滚默认安装
 
     @staticmethod

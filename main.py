@@ -115,7 +115,7 @@ class Window(FluentWindow):
 
         self.audioSeparationInterface._real_page_1.add_history_task(
             params['input'],
-            params['output']
+            output_dir
         )
 
         InfoBar.success("完成", f"分离完成，文件保存在 {output_dir}", parent=self)

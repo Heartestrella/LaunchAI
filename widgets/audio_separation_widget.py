@@ -9,6 +9,7 @@ from qfluentwidgets import (
     setFont, FluentIcon as FIF, isDarkTheme,
     IconWidget, InfoBar, ExpandGroupSettingCard, SpinBox
 )
+from widgets.audio_waveform_widget import AudioWaveformWidget
 import os
 
 
@@ -20,6 +21,7 @@ class AudioSeparationWidget(QWidget):
         # self.setObjectName("audioSeparationInterface")
         self._input_path = ""
         self._output_dir = ""
+        self._waveform_previews = []
         self._setup_ui()
         self._connect_signals()
 
@@ -457,6 +459,14 @@ class AudioSeparationWidget(QWidget):
         info_layout.addWidget(time_label)
         item_layout.addLayout(info_layout, stretch=1)
 
+        # 播放预览按钮
+        play_btn = ToolButton(FIF.PLAY, self)
+        play_btn.setFixedSize(32, 32)
+        play_btn.setToolTip("打开波形预览")
+        play_btn.clicked.connect(
+            lambda: self._open_waveform_preview(output_dir))
+        item_layout.addWidget(play_btn)
+
         # 文件夹按钮
         folder_btn = ToolButton(FIF.FOLDER, self)
         folder_btn.setFixedSize(32, 32)
@@ -482,6 +492,21 @@ class AudioSeparationWidget(QWidget):
             QDesktopServices.openUrl(QUrl.fromLocalFile(output_dir))
         else:
             InfoBar.warning("目录不存在", "输出目录已被移动或删除", parent=self)
+
+    def _open_waveform_preview(self, output_dir: str):
+        """打开波形预览窗口，默认不选取音频并将文件对话根目录设置为输出目录"""
+        if not output_dir or not os.path.isdir(output_dir):
+            InfoBar.warning("路径无效", "输出目录不存在或不是文件夹", parent=self)
+            return
+
+        preview = AudioWaveformWidget()
+        preview.set_file_root_dir(output_dir)
+        preview.disable_mic_recording()
+        preview.show()
+        self._waveform_previews.append(preview)
+        preview.destroyed.connect(
+            lambda _, p=preview: self._waveform_previews.remove(p)
+        )
 
     def _on_start(self):
         if not self._input_path:
