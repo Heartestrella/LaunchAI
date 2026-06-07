@@ -7,11 +7,16 @@ import sys
 import traceback
 import sys
 import os
+from workers.atool import resource_path
 
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+current_path = os.environ.get("PATH", "")
+ffmpeg_path = resource_path(os.path.join("resource", "ffmepg", "bin"))
+if ffmpeg_path not in current_path:
+    os.environ["PATH"] = ffmpeg_path + os.pathsep + current_path
 # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # if getattr(sys, 'frozen', False):
 #     BASE_DIR = os.path.dirname(sys.executable)
@@ -54,9 +59,8 @@ from qfluentwidgets import (NavigationItemPosition, setTheme, Theme, FluentWindo
                             SubtitleLabel, setFont,
                             SettingCardGroup, SettingCard, FluentIcon as FIF, isDarkTheme,
                             InfoBar)
-from workers.atool import resource_path
 from widgets.audio_separation_widget import AudioSeparationWidget
-# from workers.demucs_worker import DemucsWorker
+from workers.demucs_worker import DemucsWorker
 from widgets.info_page import SystemInfoPage
 from widgets.home_page import HomePage
 from widgets.setting_page import SettingsWidget
@@ -72,7 +76,7 @@ class Widget(QWidget):
         setFont(self.label, 24)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hBoxLayout.addWidget(self.label, 1, Qt.AlignmentFlag.AlignCenter)
-        self.setObjectName(text.replace(' ', '-'))
+        # self.setObjectName(text.replace(' ', '-'))
 
 class Window(FluentWindow):
     def __init__(self):
@@ -83,42 +87,55 @@ class Window(FluentWindow):
         self.systemInfoInterface = SystemInfoPage(self)
         self.settingInterface = SettingsWidget(self)
         self.audioSeparationInterface = SwitchPage("demucs",self)
-        # self.worker = None
-        # self.audioSeparationInterface.separationRequested.connect(
-        #     self.start_separation)
+        self.worker = None
         self.initNavigation()
         self.initWindow()
 
-    # def start_separation(self, params):
-    #     # 如果已有 worker 在运行，先取消
-    #     if self.worker and self.worker.isRunning():
-    #         self.worker.cancel()
-    #         self.worker.wait()
+    def start_separation(self, params):
 
-    #     self.audioSeparationInterface.set_running(True)
-    #     self.worker = DemucsWorker(params)
-    #     self.worker.progress.connect(
-    #         self.audioSeparationInterface.set_progress)
-    #     self.worker.finished.connect(self.on_separation_finished)
-    #     self.worker.error.connect(self.on_separation_error)
-    #     self.worker.start()
+        self.current_task_params = params
 
-    # def on_separation_finished(self, output_dir):
-    #     self.audioSeparationInterface.set_progress(100, "完成！")
-    #     self.audioSeparationInterface.reset_progress()
-    #     self.audioSeparationInterface.set_running(False)
-    #     # 添加历史记录（需要保存最后一次的参数）
-    #     if hasattr(self, 'last_params'):
-    #         self.audioSeparationInterface.add_history_task(
-    #             self.last_params['input'],
-    #             self.last_params['output']
-    #         )
-    #     InfoBar.success("完成", f"分离完成，文件保存在 {output_dir}", parent=self)
+        # 如果已有 worker 在运行，先取消
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait()
 
-    # def on_separation_error(self, error_msg):
-    #     self.audioSeparationInterface.reset_progress()
-    #     self.audioSeparationInterface.set_running(False)
-    #     InfoBar.error("错误", error_msg, parent=self)
+        self.audioSeparationInterface._real_page_1.set_running(True)
+        self.worker = DemucsWorker(params)
+        self.worker.progress.connect(
+            self.audioSeparationInterface._real_page_1.set_progress)
+        self.worker.finished.connect(lambda output_dir: self.on_separation_finished(output_dir, params))
+        self.worker.error.connect(self.on_separation_error)
+        self.worker.start()
+
+    def on_separation_finished(self, output_dir, params):
+        self.audioSeparationInterface._real_page_1.set_progress(100, "完成！")
+        self.audioSeparationInterface._real_page_1.reset_progress()
+        self.audioSeparationInterface._real_page_1.set_running(False)
+
+        self.audioSeparationInterface._real_page_1.add_history_task(
+            params['input'],
+            params['output']
+        )
+
+        InfoBar.success("完成", f"分离完成，文件保存在 {output_dir}", parent=self)
+
+    def on_separation_error(self, error_msg):
+        self.audioSeparationInterface._real_page_1.reset_progress()
+        self.audioSeparationInterface._real_page_1.set_running(False)
+        InfoBar.error("错误", error_msg, parent=self)
+
+    def navigate_to(self, page_name: str):
+        """导航到指定页面"""
+        page_map = {
+            "home": self.homeInterface,
+            "setting": self.settingInterface,
+            "system": self.systemInfoInterface,
+            "demucs": self.audioSeparationInterface,
+        }
+        target = page_map.get(page_name)
+        if target:
+            self.switchTo(target)
 
     def Switch_color_tone(self):
         if isDarkTheme():
@@ -127,7 +144,7 @@ class Window(FluentWindow):
             setTheme(Theme.DARK)
 
     def initNavigation(self):
-        self.addSubInterface(self.homeInterface, FIF.HOME, '主页')
+        self.addSubInterface(self.homeInterface, FIF.HOME, '主页', )
         self.addSubInterface(self.systemInfoInterface, FIF.INFO, '系统信息')
         audio_parent = Widget('音频', self)
         audio_parent.setObjectName("audioParent")

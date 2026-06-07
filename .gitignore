@@ -1,0 +1,8 @@
+venv/
+qt_venv/
+_cache/
+torch_cache/
+*.pyc
+*.pyo
+*.pyd
+__pycache__/

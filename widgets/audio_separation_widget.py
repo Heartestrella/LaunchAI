@@ -167,10 +167,10 @@ class AudioSeparationWidget(QWidget):
         seg_layout.addWidget(BodyLabel("分段长度 (segment)"))
         seg_layout.addStretch()
         self._seg_sl = Slider(Qt.Orientation.Horizontal)
-        self._seg_sl.setRange(1, 20)
-        self._seg_sl.setValue(10)
+        self._seg_sl.setRange(1, 7)
+        self._seg_sl.setValue(7)
         self._seg_sl.setFixedWidth(200)
-        self._seg_val = BodyLabel("10")
+        self._seg_val = BodyLabel("7")
         self._seg_val.setFixedWidth(24)
         seg_layout.addWidget(self._seg_sl)
         seg_layout.addWidget(self._seg_val)
@@ -382,6 +382,10 @@ class AudioSeparationWidget(QWidget):
         device = device_text.split()[0]
         fmt_text = self._fmt_combo.currentText()
         fmt = fmt_text.split()[0]
+        segment_value = self._seg_sl.value()
+        # if segment_value > 7.8:
+        #     segment_value = 7
+        segment_value = int(segment_value)
         return {
             "input": self._input_path,
             "output": self._output_dir,
@@ -394,7 +398,7 @@ class AudioSeparationWidget(QWidget):
                 "other": self._other_cb.isChecked(),
             },
             "shifts": self._shifts_sl.value(),
-            "segment": self._seg_sl.value(),
+            "segment": segment_value,
             "overlap": self._ov_sl.value() / 100,
             "format": fmt,
         }
