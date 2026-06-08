@@ -3,7 +3,7 @@
 依赖: pip install PyQt6 pyqt-fluent-widgets
 运行: python launcher_home.py
 """
-from workers.atool import resource_path
+from utils.atool import resource_path
 from pathlib import Path
 import sys
 import os

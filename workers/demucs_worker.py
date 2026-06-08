@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import time
+from logger import info, warning, debug, error
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -161,13 +162,13 @@ class DemucsWorker(QThread):
                 self.output.emit(self._html("音频分离完成！", "#4CAF50"))
                 self.finished.emit(sep_dir)
             else:
-                print("\n" + "=" * 60)
-                print(f"Demucs 分离失败 (返回码: {self.process.returncode})")
-                print("完整输出:")
-                print("-" * 60)
+                error("\n" + "=" * 60)
+                error(f"Demucs 分离失败 (返回码: {self.process.returncode})")
+                error("完整输出:")
+                error("-" * 60)
                 for line in output_lines:
-                    print(line)
-                print("=" * 60)
+                    error(line)
+                error("=" * 60)
                 self.error.emit(f"分离失败，返回码: {self.process.returncode}")
 
         except Exception as e:
