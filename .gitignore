@@ -6,3 +6,5 @@ torch_cache/
 *.pyo
 *.pyd
 __pycache__/
+_git_projects/*
+results/
