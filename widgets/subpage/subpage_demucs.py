@@ -509,14 +509,3 @@ class AudioSeparationWidget(QWidget):
         preview.destroyed.connect(
             lambda _, p=preview: self._waveform_previews.remove(p)
         )
-
-    def _on_start(self):
-        if not self._input_path:
-            InfoBar.warning("缺少输入文件", "请先选择音频文件", parent=self)
-            return
-        if not self._output_dir:
-            InfoBar.warning("缺少输出目录", "请选择输出目录", parent=self)
-            return
-
-        # 发射信号，由主窗口处理
-        self.separationRequested.emit(self.get_params())

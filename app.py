@@ -89,43 +89,11 @@ class Window(FluentWindow):
         self.settingInterface = SettingsWidget(self)
         self.audioSeparationInterface = SwitchPage("demucs",self)
         self.ESRGANinterface = SwitchPage("ESRGAN",self)
+        self.whisperInterface = SwitchPage("whisper",self)
         self.worker = None
         self.initNavigation()
         self.initWindow()
 
-    def start_separation(self, params):
-
-        self.current_task_params = params
-
-        # 如果已有 worker 在运行，先取消
-        if self.worker and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait()
-
-        self.audioSeparationInterface._real_page_1.set_running(True)
-        self.worker = DemucsWorker(params)
-        self.worker.progress.connect(
-            self.audioSeparationInterface._real_page_1.set_progress)
-        self.worker.finished.connect(lambda output_dir: self.on_separation_finished(output_dir, params))
-        self.worker.error.connect(self.on_separation_error)
-        self.worker.start()
-
-    def on_separation_finished(self, output_dir, params):
-        self.audioSeparationInterface._real_page_1.set_progress(100, "完成！")
-        self.audioSeparationInterface._real_page_1.reset_progress()
-        self.audioSeparationInterface._real_page_1.set_running(False)
-
-        self.audioSeparationInterface._real_page_1.add_history_task(
-            params['input'],
-            output_dir
-        )
-
-        InfoBar.success("完成", f"分离完成，文件保存在 {output_dir}", parent=self)
-
-    def on_separation_error(self, error_msg):
-        self.audioSeparationInterface._real_page_1.reset_progress()
-        self.audioSeparationInterface._real_page_1.set_running(False)
-        InfoBar.error("错误", error_msg, parent=self)
 
     def navigate_to(self, page_name: str):
         """导航到指定页面"""
@@ -134,6 +102,7 @@ class Window(FluentWindow):
             "setting": self.settingInterface,
             "system": self.systemInfoInterface,
             "demucs": self.audioSeparationInterface,
+            "whisper": self.whisperInterface,
         }
         target = page_map.get(page_name)
         if target:
@@ -156,6 +125,12 @@ class Window(FluentWindow):
             self.audioSeparationInterface,
             FIF.DEVELOPER_TOOLS,
             '音频分离 - Demucs',
+            parent=audio_parent
+        )
+        self.addSubInterface(
+            self.whisperInterface,
+            FIF.MICROPHONE,
+            '语音识别 - Whisper',
             parent=audio_parent
         )
 
@@ -192,6 +167,45 @@ class Window(FluentWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         debug(f"窗口分辨率: {self.width()} × {self.height()}")
+
+
+    # Worker Call
+    def start_separation(self, params):
+
+        self.current_task_params = params
+
+        # 如果已有 worker 在运行，先取消
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel()
+            self.worker.wait()
+
+        self.audioSeparationInterface._real_page_1.set_running(True)
+        self.worker = DemucsWorker(params)
+        self.worker.progress.connect(
+            self.audioSeparationInterface._real_page_1.set_progress)
+        self.worker.finished.connect(lambda output_dir: self.on_separation_finished(output_dir, params))
+        self.worker.error.connect(self.on_separation_error)
+        self.worker.start()
+
+    def on_separation_finished(self, output_dir, params):
+        self.audioSeparationInterface._real_page_1.set_progress(100, "完成！")
+        self.audioSeparationInterface._real_page_1.reset_progress()
+        self.audioSeparationInterface._real_page_1.set_running(False)
+
+        self.audioSeparationInterface._real_page_1.add_history_task(
+            params['input'],
+            output_dir
+        )
+
+        InfoBar.success("完成", f"分离完成，文件保存在 {output_dir}", parent=self)
+
+    def on_separation_error(self, error_msg):
+        self.audioSeparationInterface._real_page_1.reset_progress()
+        self.audioSeparationInterface._real_page_1.set_running(False)
+        InfoBar.error("错误", error_msg, parent=self)
+
+
+
 
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(

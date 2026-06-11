@@ -237,6 +237,8 @@ class NoInstallWidget(QWidget):
         elif self.package_name == "Real-ESRGAN":
             self.pip = PipWorker(
                 ["Real-ESRGAN"], from_git=(True, "https://github.com/xinntao/Real-ESRGAN"))
+        elif self.package_name == "openai-whisper":
+            self.pip = PipWorker(["openai-whisper"])  # 直接安装 最简单的一集
         self.pip.output_signal.connect(self._append_log)
         self.pip.finished_signal.connect(self.on_install_finished)
         self.pip.start()
@@ -323,6 +325,9 @@ class SwitchPage(QWidget):
             elif self.page_name == "ESRGAN":
                 self.setObjectName("ESRGANinterface")
                 self.handel_ESRGAN()
+            elif self.page_name == "whisper":
+                self.setObjectName("whisperInterface")
+                self.handel_whisper()
 
     def handel_demucs(self):
         from widgets.subpage.subpage_demucs import AudioSeparationWidget
@@ -353,3 +358,15 @@ class SwitchPage(QWidget):
 
     def switch_page(self, index: int = 0):
         self.stacked_layout.setCurrentIndex(index)
+
+    def handel_whisper(self):
+        from widgets.subpage.subpage_whisper import WhisperWidget
+        self._real_page_0 = NoInstallWidget("openai-whisper")
+        self._real_page_1 = WhisperWidget(self, device_options=CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        if not PipWorker.is_package_installed("openai-whisper"):
+            self.switch_page(0)
+        else:
+            self.switch_page(1)
