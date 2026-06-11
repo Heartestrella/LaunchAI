@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
-from node_registry import REGISTRY, NodeDef, PortDef
+from node.node_registry import REGISTRY, NodeDef, PortDef
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -66,7 +66,7 @@ from widgets.subpage.subpage_info_page import SystemInfoPage
 from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
 from widgets.subpage.subpage_switch_pages import SwitchPage
-
+from node.node_editor import NodeEditorPage
 
 class Widget(QWidget):
     def __init__(self, text: str, parent=None):
@@ -82,7 +82,7 @@ class Widget(QWidget):
 class Window(FluentWindow):
     def __init__(self):
         super().__init__()
-        self.resize(1075, 726)
+        self.resize(1316, 726)
         self.setMinimumSize(860, 600)
         self.homeInterface = HomePage(self)
         self.systemInfoInterface = SystemInfoPage(self)
@@ -90,6 +90,7 @@ class Window(FluentWindow):
         self.audioSeparationInterface = SwitchPage("demucs",self)
         self.ESRGANinterface = SwitchPage("ESRGAN",self)
         self.whisperInterface = SwitchPage("whisper",self)
+        self.nodeEditorInterface = NodeEditorPage(self)
         self.worker = None
         self.initNavigation()
         self.initWindow()
@@ -103,6 +104,7 @@ class Window(FluentWindow):
             "system": self.systemInfoInterface,
             "demucs": self.audioSeparationInterface,
             "whisper": self.whisperInterface,
+            "node_editor": self.nodeEditorInterface,
         }
         target = page_map.get(page_name)
         if target:
@@ -117,6 +119,7 @@ class Window(FluentWindow):
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '主页', )
         self.addSubInterface(self.systemInfoInterface, FIF.INFO, '系统信息')
+        self.addSubInterface(self.nodeEditorInterface, FIF.EDIT, '节点编辑器')
         audio_parent = Widget('音频', self)
         audio_parent.setObjectName("audioParent")
         self.addSubInterface(audio_parent, FIF.MUSIC, '音频')

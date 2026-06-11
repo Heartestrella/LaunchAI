@@ -4,9 +4,9 @@ node_editor.py
 主编辑器窗口：画布 + Shift+A 节点面板 + 属性面板 + 工具栏
 """
 
-from node_canvas import NodeCanvas
-from node_graph import NodeGraph
-from node_registry import REGISTRY, CATEGORY_COLORS, PORT_COLORS, NodeDef
+from node.node_canvas import NodeCanvas
+from node.node_graph import NodeGraph
+from node.node_registry import REGISTRY, CATEGORY_COLORS, PORT_COLORS, NodeDef
 from qfluentwidgets import (
     setTheme, Theme, setThemeColor,
     FluentWindow, NavigationItemPosition,
@@ -148,8 +148,8 @@ class NodePickerPanel(QWidget):
             cat_item.setFlags(cat_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             color = CATEGORY_COLORS.get(cat, "#555555")
             cat_item.setForeground(0, QColor(color))
-            fnt = QFont("Segoe UI", 11, QFont.Weight.Bold)
-            cat_item.setFont(0, fnt)
+            # fnt = QFont("Segoe UI", 11, QFont.Weight.Bold)
+            # cat_item.setFont(0, fnt)
             self._tree.addTopLevelItem(cat_item)
 
             for nd in matched:
@@ -182,13 +182,84 @@ class NodePickerPanel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  属性面板
+#  属性面板 (WinUI 3 / Fluent 风格)
 # ══════════════════════════════════════════════════════════════════════
 
-class PropertyPanel(QWidget):
-    """右侧属性面板，显示选中节点的参数。"""
+class PortBadge(QFrame):
+    """Pill 风格的端口徽章：圆点 + 标签 + 类型 tag。"""
 
-    param_changed = pyqtSignal(str, str, object)  # iid, key, value
+    def __init__(self, label: str, ptype: str, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(30)
+        color = PORT_COLORS.get(ptype, "#AAAAAA")
+
+        self.setStyleSheet(f"""
+            PortBadge {{
+                background: rgba(255,255,255,0.04);
+                border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 6px;
+            }}
+        """)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 8, 0)
+        lay.setSpacing(8)
+
+        dot = QLabel(self)
+        dot.setFixedSize(8, 8)
+        dot.setStyleSheet(
+            f"background:{color};border-radius:4px;border:1px solid rgba(0,0,0,0.4);"
+        )
+        lay.addWidget(dot)
+
+        name = BodyLabel(label, self)
+        lay.addWidget(name)
+        lay.addStretch()
+
+        type_tag = CaptionLabel(ptype, self)
+        type_tag.setStyleSheet(
+            f"color:{color};"
+            f"background:rgba(255,255,255,0.05);"
+            f"border:1px solid {color}55;"
+            f"border-radius:4px;"
+            f"padding:1px 6px;"
+        )
+        lay.addWidget(type_tag)
+
+
+class SectionCard(CardWidget):
+    """带标题的分组卡片。"""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._lay = QVBoxLayout(self)
+        self._lay.setContentsMargins(14, 12, 14, 12)
+        self._lay.setSpacing(8)
+
+        self._title = CaptionLabel(title.upper(), self)
+        self._title.setStyleSheet(
+            "color:rgba(255,255,255,0.55);"
+            "letter-spacing:1px;"
+            "font-weight:600;"
+        )
+        self._lay.addWidget(self._title)
+
+    def add(self, w: QWidget):
+        self._lay.addWidget(w)
+
+    def clear_items(self):
+        # 保留标题（index 0），清掉其它
+        while self._lay.count() > 1:
+            item = self._lay.takeAt(1)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+
+class PropertyPanel(QWidget):
+    """右侧属性面板 (WinUI 3 风格)。"""
+
+    param_changed = pyqtSignal(str, str, object)   # iid, key, value
 
     def __init__(self, graph: NodeGraph, parent=None):
         super().__init__(parent)
@@ -197,37 +268,51 @@ class PropertyPanel(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Expanding)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        # ── 滚动容器 ──────────────────────────────────────────────────
+        self._scroll = SmoothScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setStyleSheet("background:transparent;border:none;")
 
-        # 标题
-        self._title_lbl = StrongBodyLabel("未选中节点", self)
-        root.addWidget(self._title_lbl)
-        root.addWidget(self._make_sep())
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._scroll)
 
-        # 端口信息
-        self._port_area = QWidget(self)
-        self._port_lay = QVBoxLayout(self._port_area)
-        self._port_lay.setContentsMargins(0, 0, 0, 0)
-        self._port_lay.setSpacing(4)
-        root.addWidget(self._port_area)
-        root.addWidget(self._make_sep())
+        body = QWidget()
+        self._scroll.setWidget(body)
 
-        # 参数区
-        self._param_scroll = SmoothScrollArea(self)
-        self._param_scroll.setWidgetResizable(True)
-        self._param_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._param_scroll.setStyleSheet("background:transparent;border:none;")
-        self._param_container = QWidget()
-        self._param_lay = QVBoxLayout(self._param_container)
-        self._param_lay.setContentsMargins(0, 0, 0, 0)
-        self._param_lay.setSpacing(6)
-        self._param_scroll.setWidget(self._param_container)
-        root.addWidget(self._param_scroll, 1)
+        self._root = QVBoxLayout(body)
+        self._root.setContentsMargins(14, 14, 14, 14)
+        self._root.setSpacing(10)
 
-        root.addStretch()
+        # ── 头部：节点名 + IID ────────────────────────────────────────
+        self._header_card = CardWidget(self)
+        h_lay = QVBoxLayout(self._header_card)
+        h_lay.setContentsMargins(14, 12, 14, 12)
+        h_lay.setSpacing(2)
 
+        self._title_lbl = StrongBodyLabel("未选中节点", self._header_card)
+        self._iid_lbl = CaptionLabel("", self._header_card)
+        self._iid_lbl.setStyleSheet("color:rgba(255,255,255,0.45);")
+
+        h_lay.addWidget(self._title_lbl)
+        h_lay.addWidget(self._iid_lbl)
+        self._root.addWidget(self._header_card)
+
+        # ── 端口卡片 ──────────────────────────────────────────────────
+        self._inputs_card = SectionCard("输入端口", self)
+        self._outputs_card = SectionCard("输出端口", self)
+        self._params_card = SectionCard("参数", self)
+
+        self._root.addWidget(self._inputs_card)
+        self._root.addWidget(self._outputs_card)
+        self._root.addWidget(self._params_card)
+        self._root.addStretch(1)
+
+        # 默认隐藏（无选中）
+        self._set_cards_visible(False)
+
+    # ── 公共方法 ──────────────────────────────────────────────────────
     def show_node(self, iid: str):
         self._iid = iid
         node = self.graph.nodes.get(iid)
@@ -235,96 +320,74 @@ class PropertyPanel(QWidget):
             return
 
         nd = node.definition
-        self._title_lbl.setText(f"{node.title}  [{iid}]")
+        self._title_lbl.setText(node.title)
+        self._iid_lbl.setText(f"ID  ·  {iid}")
 
-        # 清空端口区
-        for i in reversed(range(self._port_lay.count())):
-            w = self._port_lay.itemAt(i).widget()
-            if w:
-                w.deleteLater()
+        # 端口
+        self._inputs_card.clear_items()
+        self._outputs_card.clear_items()
 
-        if nd:
-            if nd.inputs:
-                self._port_lay.addWidget(CaptionLabel("输入端口", self))
-                for p in nd.inputs:
-                    self._port_lay.addWidget(self._port_badge(p.label, p.type))
-            if nd.outputs:
-                self._port_lay.addWidget(CaptionLabel("输出端口", self))
-                for p in nd.outputs:
-                    self._port_lay.addWidget(self._port_badge(p.label, p.type))
+        if nd and nd.inputs:
+            for p in nd.inputs:
+                self._inputs_card.add(PortBadge(p.label, p.type, self))
+            self._inputs_card.setVisible(True)
+        else:
+            self._inputs_card.setVisible(False)
 
-        # 清空参数区
-        for i in reversed(range(self._param_lay.count())):
-            w = self._param_lay.itemAt(i).widget()
-            if w:
-                w.deleteLater()
+        if nd and nd.outputs:
+            for p in nd.outputs:
+                self._outputs_card.add(PortBadge(p.label, p.type, self))
+            self._outputs_card.setVisible(True)
+        else:
+            self._outputs_card.setVisible(False)
 
+        # 参数
+        self._params_card.clear_items()
         if node.params:
-            self._param_lay.addWidget(CaptionLabel("参数", self))
             for key, val in node.params.items():
-                row = QHBoxLayout()
-                k_lbl = CaptionLabel(key, self)
-                k_lbl.setFixedWidth(90)
-                k_lbl.setStyleSheet("color:rgba(180,180,180,180);")
-                edit = QLineEdit(str(val), self)
-                edit.setStyleSheet("""
-                    QLineEdit {
-                        background:#1e1e1e;
-                        border:1px solid rgba(255,255,255,0.12);
-                        border-radius:5px;
-                        color:#e0e0e0;
-                        padding:3px 7px;
-                        font-size:12px;
-                    }
-                    QLineEdit:focus{border-color:#0078D4;}
-                """)
-                # 捕获 key 到闭包
+                self._params_card.add(self._make_param_row(iid, key, val))
+            self._params_card.setVisible(True)
+        else:
+            self._params_card.setVisible(False)
 
-                def _make_handler(k):
-                    def _h(text):
-                        self.graph.set_param(iid, k, text)
-                        self.param_changed.emit(iid, k, text)
-                    return _h
-                edit.textChanged.connect(_make_handler(key))
-                row.addWidget(k_lbl)
-                row.addWidget(edit, 1)
-                w = QWidget(self)
-                w.setLayout(row)
-                self._param_lay.addWidget(w)
+        self._header_card.setVisible(True)
 
     def clear_selection(self):
         self._iid = None
         self._title_lbl.setText("未选中节点")
-        for lay in (self._port_lay, self._param_lay):
-            for i in reversed(range(lay.count())):
-                w = lay.itemAt(i).widget()
-                if w:
-                    w.deleteLater()
+        self._iid_lbl.setText("")
+        self._inputs_card.clear_items()
+        self._outputs_card.clear_items()
+        self._params_card.clear_items()
+        self._set_cards_visible(False)
 
-    def _port_badge(self, label: str, ptype: str) -> QWidget:
-        w = QWidget(self)
-        lay = QHBoxLayout(w)
+    # ── 内部 ──────────────────────────────────────────────────────────
+    def _set_cards_visible(self, visible: bool):
+        self._inputs_card.setVisible(visible)
+        self._outputs_card.setVisible(visible)
+        self._params_card.setVisible(visible)
+
+    def _make_param_row(self, iid: str, key: str, val) -> QWidget:
+        row = QWidget(self)
+        lay = QVBoxLayout(row)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(6)
-        dot = QLabel("●", w)
-        color = PORT_COLORS.get(ptype, "#AAAAAA")
-        dot.setStyleSheet(f"color:{color};font-size:10px;")
-        lbl = BodyLabel(label, w)
-        lbl.setStyleSheet("color:rgba(200,200,200,200);font-size:12px;")
-        type_lbl = CaptionLabel(ptype, w)
-        type_lbl.setStyleSheet(f"color:{color};font-size:10px;")
-        lay.addWidget(dot)
-        lay.addWidget(lbl)
-        lay.addStretch()
-        lay.addWidget(type_lbl)
-        return w
+        lay.setSpacing(4)
 
-    @staticmethod
-    def _make_sep() -> QFrame:
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background:rgba(255,255,255,0.08);max-height:1px;")
-        return sep
+        name = CaptionLabel(key, row)
+        name.setStyleSheet("color:rgba(255,255,255,0.65);")
+        lay.addWidget(name)
+
+        edit = FLineEdit(row)
+        edit.setText(str(val))
+        edit.setClearButtonEnabled(True)
+
+        def _h(text, k=key):
+            self.graph.set_param(iid, k, text)
+            self.param_changed.emit(iid, k, text)
+
+        edit.textChanged.connect(_h)
+        lay.addWidget(edit)
+        return row
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -366,7 +429,7 @@ class NodeEditorPage(QWidget):
         badge.setStyleSheet(
             "background:rgba(247,183,49,0.2);color:#F7B731;"
             "border:1px solid rgba(247,183,49,0.4);"
-            "border-radius:8px;padding:1px 8px;font-size:11px;")
+            "border-radius:4px;padding:1px 6px;font-size:10px;")
         tb_lay.addWidget(badge)
         tb_lay.addStretch()
 
@@ -511,7 +574,7 @@ class NodeEditorPage(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     setTheme(Theme.DARK)
-    setThemeColor(ACCENT)
+    # setThemeColor(ACCENT)
 
     win = QWidget()
     win.setWindowTitle("Node Editor — Demo")

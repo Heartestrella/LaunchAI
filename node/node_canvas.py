@@ -1,11 +1,19 @@
 """
 node_canvas.py
 ~~~~~~~~~~~~~~
-节点画布 QWidget —— ComfyUI 风格。
+节点画布 QWidget —— ComfyUI / LiteGraph 风格。
+
+交互：
+  - 左键拖输出端口 → 拉新连线
+  - 左键拖输入端口 → 摘下已有连线，重新连
+  - 右键单击连线附近 → 删除该连线
+  - 右键拖动 → 画切刀，松开切断所有相交连线
+  - Delete → 删除选中节点
+  - 中键 / 左键拖空白 → 平移
+  - 滚轮 → 缩放
 """
 
 from __future__ import annotations
-import math
 from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import (
@@ -14,38 +22,42 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont, QFontMetrics,
     QPainterPath, QCursor, QKeyEvent, QWheelEvent,
-    QMouseEvent, QPaintEvent, QLinearGradient,
+    QMouseEvent, QPaintEvent,
 )
 from PyQt6.QtWidgets import QWidget, QApplication
 
-from node_registry import PORT_COLORS, REGISTRY
-from node_graph import NodeGraph, NodeInstance, Connection
+from node.node_registry import PORT_COLORS, REGISTRY
+from node.node_graph import NodeGraph, NodeInstance, Connection
 
-# ── 布局常量 ──────────────────────────────────────────────────────────
-NODE_W = 220        # 节点宽度
-NODE_HEADER = 26         # 标题栏高度
-PORT_ROW_H = 22         # 每行端口高度
-PORT_R = 5          # 端口圆半径
-PORT_PAD = 12         # 端口到左/右边缘距离
-CORNER_R = 6          # 节点圆角（ComfyUI 偏小）
-SHADOW_OFF = 4          # 阴影偏移
+# ── 布局常量（对齐 LiteGraph 源码默认值） ─────────────────────────────
+NODE_W = 210
+NODE_HEADER = 30
+PORT_ROW_H = 20
+PORT_R = 4
+PORT_PAD = 10
+CORNER_R = 8
+SHADOW_OFF = 6
 
-FONT_TITLE = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
-FONT_PORT = QFont("Segoe UI", 8)
-FONT_CATEGORY = QFont("Segoe UI", 7)
+# FONT_TITLE = QFont("Arial", 11, QFont.Weight.Bold)
+# FONT_PORT = QFont("Arial", 9)
 
-# ── 配色（ComfyUI 风格） ──────────────────────────────────────────────
+# ── 配色 ──────────────────────────────────────────────────────────────
 C_BG = QColor(35, 35, 35)
-C_GRID_DOT = QColor(55, 55, 55)
-C_NODE_BODY = QColor(53, 53, 53, 235)
-C_NODE_BODY_ALT = QColor(45, 45, 45, 235)   # slot 交替行
-C_NODE_BORDER = QColor(20, 20, 20)
-C_NODE_BORDER_HI = QColor(255, 204, 0)        # 选中：ComfyUI 黄
-C_HEADER_OVERLAY = QColor(0, 0, 0, 60)        # 头部上加一层暗色叠加
-C_TEXT = QColor(220, 220, 220)
-C_TEXT_DIM = QColor(170, 170, 170)
-C_SHADOW = QColor(0, 0, 0, 110)
-C_SEPARATOR = QColor(0, 0, 0, 70)
+C_GRID_MINOR = QColor(45, 45, 45)
+C_GRID_MAJOR = QColor(55, 55, 55)
+
+C_NODE_BODY = QColor(53, 53, 53)
+C_NODE_HEADER = QColor(45, 45, 45)
+C_NODE_BORDER = QColor(0, 0, 0)
+C_NODE_SELECTED = QColor(255, 255, 255)
+C_SHADOW = QColor(0, 0, 0, 130)
+
+C_TITLE_TEXT = QColor(255, 255, 255)
+C_PORT_TEXT = QColor(204, 204, 204)
+C_PORT_BORDER = QColor(0, 0, 0)
+C_SEPARATOR = QColor(0, 0, 0, 80)
+
+C_CUT_LINE = QColor(255, 80, 80, 220)
 
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -53,7 +65,7 @@ def _lerp(a: float, b: float, t: float) -> float:
 
 
 class NodeCanvas(QWidget):
-    """节点画布主控件 (ComfyUI 风格)。"""
+    """节点画布 (ComfyUI / LiteGraph 风格)。"""
 
     node_selected = pyqtSignal(str)
     node_deselected = pyqtSignal()
@@ -73,13 +85,19 @@ class NodeCanvas(QWidget):
         self._drag_node:  str | None = None
         self._drag_start: QPointF | None = None
 
+        # 连线拖拽
         self._wire_src_iid:  str | None = None
         self._wire_src_port: str | None = None
         self._wire_cur:      QPointF | None = None
         self._wire_hover:    tuple | None = None
 
+        # 平移
         self._pan_start:  QPoint | None = None
         self._pan_offset: QPointF | None = None
+
+        # 切刀
+        self._cut_start: QPointF | None = None
+        self._cut_end:   QPointF | None = None
 
         self.setMinimumSize(800, 600)
         self._set_style()
@@ -102,7 +120,7 @@ class NodeCanvas(QWidget):
             len(nd.inputs) if nd else 0,
             len(nd.outputs) if nd else 0
         )
-        h = NODE_HEADER + max(n_ports, 1) * PORT_ROW_H + 6
+        h = NODE_HEADER + max(n_ports, 1) * PORT_ROW_H + 8
         return QRectF(node.x, node.y, NODE_W, h)
 
     def port_pos(self, node: NodeInstance, port_name: str, is_output: bool) -> QPointF | None:
@@ -115,8 +133,7 @@ class NodeCanvas(QWidget):
         if idx is None:
             return None
         nr = self.node_rect(node)
-        y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2
-        # 端口正好压在节点边线上（ComfyUI 风格）
+        y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2 + 2
         x = nr.right() if is_output else nr.left()
         return QPointF(x, y)
 
@@ -128,7 +145,7 @@ class NodeCanvas(QWidget):
             for is_out, ports in ((True, nd.outputs), (False, nd.inputs)):
                 for port in ports:
                     pp = self.port_pos(node, port.name, is_out)
-                    if pp and (canvas_pos - pp).manhattanLength() < PORT_R * 2.4:
+                    if pp and (canvas_pos - pp).manhattanLength() < PORT_R * 3:
                         return (iid, port.name, is_out)
         return None
 
@@ -136,6 +153,13 @@ class NodeCanvas(QWidget):
         for iid, node in reversed(list(self.graph.nodes.items())):
             if self.node_rect(node).contains(canvas_pos):
                 return iid
+        return None
+
+    def _find_connection_to_input(self, iid: str, port_name: str):
+        """查找连到指定输入端口的连线，返回 (cid, conn) 或 None。"""
+        for cid, conn in self.graph.connections.items():
+            if conn.dst_iid == iid and conn.dst_port == port_name:
+                return cid, conn
         return None
 
     # ── 绘制 ──────────────────────────────────────────────────────────
@@ -163,37 +187,75 @@ class NodeCanvas(QWidget):
                 sp = self.port_pos(src_node, self._wire_src_port, True)
                 if sp:
                     self._draw_wire(p, sp, self._wire_cur,
-                                    QColor(220, 220, 220, 180), dashed=True)
+                                    QColor(220, 220, 220, 200), dashed=True)
 
-        # 节点（先画阴影再画本体，避免阴影互相覆盖正确顺序）
+        # 节点
         for node in self.graph.nodes.values():
             self._draw_node_shadow(p, node)
         for node in self.graph.nodes.values():
             self._draw_node(p, node)
 
+        # 切刀线（画布坐标系内，跟随平移缩放）
+        if self._cut_start is not None and self._cut_end is not None:
+            pen = QPen(C_CUT_LINE, 2.0 / self._scale, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(self._cut_start, self._cut_end)
+
         p.restore()
 
+    # ── 网格 ──────────────────────────────────────────────────────────
     def _draw_grid(self, p: QPainter):
-        """点状网格，ComfyUI 风格更暗更稀。"""
-        spacing = 30 * self._scale
-        if spacing < 6:
+        """LiteGraph 风格：细线网格 + 每 5 格一条主线。"""
+        step = 25.0 * self._scale
+        if step < 5:
             return
-        p.setPen(QPen(C_GRID_DOT, 1.2))
-        ox = self._offset.x() % spacing
-        oy = self._offset.y() % spacing
-        x = ox
-        while x < self.width():
-            y = oy
-            while y < self.height():
-                p.drawPoint(int(x), int(y))
-                y += spacing
-            x += spacing
 
+        w, h = self.width(), self.height()
+        ox = self._offset.x() % step
+        oy = self._offset.y() % step
+
+        major_every = 5
+        start_x_idx = int(-self._offset.x() // step)
+        start_y_idx = int(-self._offset.y() // step)
+
+        # 细线
+        p.setPen(QPen(C_GRID_MINOR, 1))
+        x, idx = ox, start_x_idx
+        while x < w:
+            if idx % major_every != 0:
+                p.drawLine(int(x), 0, int(x), h)
+            x += step
+            idx += 1
+
+        y, idx = oy, start_y_idx
+        while y < h:
+            if idx % major_every != 0:
+                p.drawLine(0, int(y), w, int(y))
+            y += step
+            idx += 1
+
+        # 主线
+        p.setPen(QPen(C_GRID_MAJOR, 1))
+        x, idx = ox, start_x_idx
+        while x < w:
+            if idx % major_every == 0:
+                p.drawLine(int(x), 0, int(x), h)
+            x += step
+            idx += 1
+        y, idx = oy, start_y_idx
+        while y < h:
+            if idx % major_every == 0:
+                p.drawLine(0, int(y), w, int(y))
+            y += step
+            idx += 1
+
+    # ── 节点 ──────────────────────────────────────────────────────────
     def _draw_node_shadow(self, p: QPainter, node: NodeInstance):
         nr = self.node_rect(node)
         shadow = QPainterPath()
         shadow.addRoundedRect(
-            nr.adjusted(SHADOW_OFF, SHADOW_OFF, SHADOW_OFF, SHADOW_OFF),
+            nr.adjusted(2, 4, SHADOW_OFF, SHADOW_OFF),
             CORNER_R, CORNER_R
         )
         p.fillPath(shadow, C_SHADOW)
@@ -203,47 +265,23 @@ class NodeCanvas(QWidget):
         selected = node.iid in self._selected
         nr = self.node_rect(node)
 
-        # 节点本体
+        # 主体
         body = QPainterPath()
         body.addRoundedRect(nr, CORNER_R, CORNER_R)
         p.fillPath(body, C_NODE_BODY)
 
-        # slot 行交替底色（端口区）
-        n_rows = max(
-            len(nd.inputs) if nd else 0,
-            len(nd.outputs) if nd else 0,
-            1
-        )
-        for i in range(n_rows):
-            if i % 2 == 1:
-                row_rect = QRectF(
-                    nr.x() + 1,
-                    nr.y() + NODE_HEADER + i * PORT_ROW_H,
-                    nr.width() - 2,
-                    PORT_ROW_H
-                )
-                row_path = QPainterPath()
-                row_path.addRect(row_rect)
-                row_path = row_path.intersected(body)
-                p.fillPath(row_path, C_NODE_BODY_ALT)
-
-        # 标题栏 —— 纯色块 + 顶部渐变高光
+        # 标题栏（统一深灰，无分类色）
         hdr_rect = QRectF(nr.x(), nr.y(), nr.width(), NODE_HEADER)
         hdr_path = QPainterPath()
         hdr_path.addRoundedRect(hdr_rect, CORNER_R, CORNER_R)
-        hdr_path.addRect(hdr_rect.adjusted(0, CORNER_R, 0, 0))
-        hdr_path = hdr_path.intersected(body)
+        hdr_path.addRect(QRectF(hdr_rect.x(),
+                                hdr_rect.y() + CORNER_R,
+                                hdr_rect.width(),
+                                hdr_rect.height() - CORNER_R))
+        hdr_path = hdr_path.simplified().intersected(body)
+        p.fillPath(hdr_path, C_NODE_HEADER)
 
-        color_str = nd.color if nd else "#555555"
-        base = QColor(color_str)
-        grad = QLinearGradient(hdr_rect.topLeft(), hdr_rect.bottomLeft())
-        grad.setColorAt(0.0, base.lighter(118))
-        grad.setColorAt(1.0, base.darker(108))
-        p.fillPath(hdr_path, QBrush(grad))
-        # 暗色叠加层让饱和度更克制
-        p.fillPath(hdr_path, C_HEADER_OVERLAY)
-
-        # 标题与正文分隔线
+        # 标题与内容分隔线
         p.setPen(QPen(C_SEPARATOR, 1))
         p.drawLine(
             QPointF(nr.x() + 1, nr.y() + NODE_HEADER),
@@ -251,19 +289,20 @@ class NodeCanvas(QWidget):
         )
 
         # 标题文字
-        p.setFont(FONT_TITLE)
-        p.setPen(QColor(245, 245, 245))
+        # p.setFont(FONT_TITLE)
+        p.setPen(C_TITLE_TEXT)
         p.drawText(
-            QRectF(nr.x() + 10, nr.y(), nr.width() - 20, NODE_HEADER),
+            QRectF(nr.x() + 12, nr.y(), nr.width() - 24, NODE_HEADER),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             node.title
         )
 
-        # 边框（选中时高亮黄）
+        # 边框
         if selected:
-            p.setPen(QPen(C_NODE_BORDER_HI, 1.8))
+            pen = QPen(C_NODE_SELECTED, 1.5)
         else:
-            p.setPen(QPen(C_NODE_BORDER, 1.0))
+            pen = QPen(C_NODE_BORDER, 1.0)
+        p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(body)
 
@@ -272,10 +311,10 @@ class NodeCanvas(QWidget):
 
         # 端口
         for idx, port in enumerate(nd.inputs):
-            y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2
-            self._draw_port(p, nr.x(), y, port.type, False)
-            p.setFont(FONT_PORT)
-            p.setPen(C_TEXT)
+            y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2 + 2
+            self._draw_port(p, nr.x(), y, port.type)
+            # p.setFont(FONT_PORT)
+            p.setPen(C_PORT_TEXT)
             p.drawText(
                 QRectF(nr.x() + PORT_PAD, y - PORT_ROW_H / 2,
                        nr.width() - PORT_PAD * 2, PORT_ROW_H),
@@ -284,10 +323,10 @@ class NodeCanvas(QWidget):
             )
 
         for idx, port in enumerate(nd.outputs):
-            y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2
-            self._draw_port(p, nr.right(), y, port.type, True)
-            p.setFont(FONT_PORT)
-            p.setPen(C_TEXT)
+            y = nr.y() + NODE_HEADER + idx * PORT_ROW_H + PORT_ROW_H / 2 + 2
+            self._draw_port(p, nr.right(), y, port.type)
+            # p.setFont(FONT_PORT)
+            p.setPen(C_PORT_TEXT)
             p.drawText(
                 QRectF(nr.x() + PORT_PAD, y - PORT_ROW_H / 2,
                        nr.width() - PORT_PAD * 2, PORT_ROW_H),
@@ -295,18 +334,13 @@ class NodeCanvas(QWidget):
                 port.label
             )
 
-    def _draw_port(self, p: QPainter, cx: float, cy: float,
-                   port_type: str, is_output: bool):
+    def _draw_port(self, p: QPainter, cx: float, cy: float, port_type: str):
         color = QColor(PORT_COLORS.get(port_type, "#AAAAAA"))
-        # 外圈深色描边 + 内圈纯色（ComfyUI 端口经典样式）
         p.setBrush(QBrush(color))
-        p.setPen(QPen(QColor(15, 15, 15), 1.2))
+        p.setPen(QPen(C_PORT_BORDER, 1.0))
         p.drawEllipse(QPointF(cx, cy), PORT_R, PORT_R)
-        # 中心高光点
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(color.lighter(150)))
-        p.drawEllipse(QPointF(cx, cy), PORT_R * 0.35, PORT_R * 0.35)
 
+    # ── 连线 ──────────────────────────────────────────────────────────
     def _draw_connection(self, p: QPainter, conn: Connection):
         src_node = self.graph.nodes.get(conn.src_iid)
         dst_node = self.graph.nodes.get(conn.dst_iid)
@@ -326,24 +360,14 @@ class NodeCanvas(QWidget):
 
     def _draw_wire(self, p: QPainter, sp: QPointF, dp: QPointF,
                    color: QColor, dashed: bool = False):
-        # 控制点距离按水平距离自适应，连线更柔和
-        dx = max(40.0, abs(dp.x() - sp.x()) * 0.5)
-        cp1 = QPointF(sp.x() + dx, sp.y())
-        cp2 = QPointF(dp.x() - dx, dp.y())
+        dist = max(50.0, abs(dp.x() - sp.x()) * 0.5)
+        cp1 = QPointF(sp.x() + dist, sp.y())
+        cp2 = QPointF(dp.x() - dist, dp.y())
 
         path = QPainterPath(sp)
         path.cubicTo(cp1, cp2, dp)
 
-        # 外发光（让线条更醒目）
-        if not dashed:
-            glow = QColor(color)
-            glow.setAlpha(70)
-            p.setPen(QPen(glow, 5.0, Qt.PenStyle.SolidLine,
-                          Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(path)
-
-        pen = QPen(color, 2.6, Qt.PenStyle.SolidLine,
+        pen = QPen(color, 3.0, Qt.PenStyle.SolidLine,
                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
         if dashed:
             pen.setStyle(Qt.PenStyle.DashLine)
@@ -352,8 +376,55 @@ class NodeCanvas(QWidget):
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
 
-    # ── 事件 ──────────────────────────────────────────────────────────
+    # ── 切刀工具 ──────────────────────────────────────────────────────
+    @staticmethod
+    def _segments_intersect(p1: QPointF, p2: QPointF,
+                            p3: QPointF, p4: QPointF) -> bool:
+        """判断线段 p1-p2 与 p3-p4 是否相交。"""
+        def ccw(a, b, c):
+            return (c.y() - a.y()) * (b.x() - a.x()) > \
+                   (b.y() - a.y()) * (c.x() - a.x())
+        return (ccw(p1, p3, p4) != ccw(p2, p3, p4)
+                and ccw(p1, p2, p3) != ccw(p1, p2, p4))
 
+    def _bezier_samples(self, sp: QPointF, dp: QPointF, n: int = 24):
+        """采样贝塞尔曲线为多段折线。"""
+        dist = max(50.0, abs(dp.x() - sp.x()) * 0.5)
+        cp1 = QPointF(sp.x() + dist, sp.y())
+        cp2 = QPointF(dp.x() - dist, dp.y())
+        pts = []
+        for i in range(n + 1):
+            t = i / n
+            u = 1 - t
+            x = (u**3 * sp.x() + 3 * u**2 * t * cp1.x()
+                 + 3 * u * t**2 * cp2.x() + t**3 * dp.x())
+            y = (u**3 * sp.y() + 3 * u**2 * t * cp1.y()
+                 + 3 * u * t**2 * cp2.y() + t**3 * dp.y())
+            pts.append(QPointF(x, y))
+        return pts
+
+    def _cut_intersecting(self, p1: QPointF, p2: QPointF) -> int:
+        """删除所有与切线相交的连线，返回数量。"""
+        to_remove = []
+        for cid, conn in list(self.graph.connections.items()):
+            src_node = self.graph.nodes.get(conn.src_iid)
+            dst_node = self.graph.nodes.get(conn.dst_iid)
+            if not src_node or not dst_node:
+                continue
+            sp = self.port_pos(src_node, conn.src_port, True)
+            dp = self.port_pos(dst_node, conn.dst_port, False)
+            if not sp or not dp:
+                continue
+            pts = self._bezier_samples(sp, dp)
+            for a, b in zip(pts, pts[1:]):
+                if self._segments_intersect(p1, p2, a, b):
+                    to_remove.append(cid)
+                    break
+        for cid in to_remove:
+            self.graph.remove_connection(cid)
+        return len(to_remove)
+
+    # ── 事件 ──────────────────────────────────────────────────────────
     def wheelEvent(self, e: QWheelEvent):
         delta = e.angleDelta().y()
         factor = 1.12 if delta > 0 else 1 / 1.12
@@ -375,10 +446,24 @@ class NodeCanvas(QWidget):
             if hit:
                 iid, port_name, is_out = hit
                 if is_out:
+                    # 从输出端口拉新线
                     self._wire_src_iid = iid
                     self._wire_src_port = port_name
                     self._wire_cur = cp
                     return
+                else:
+                    # 从输入端口摘下已有连线，重新拉
+                    found = self._find_connection_to_input(iid, port_name)
+                    if found:
+                        cid, conn = found
+                        src_iid, src_port = conn.src_iid, conn.src_port
+                        self.graph.remove_connection(cid)
+                        self.graph_changed.emit()
+                        self._wire_src_iid = src_iid
+                        self._wire_src_port = src_port
+                        self._wire_cur = cp
+                        self.update()
+                        return
 
             iid = self.hit_node(cp)
             if iid:
@@ -398,10 +483,18 @@ class NodeCanvas(QWidget):
             self.update()
 
         elif e.button() == Qt.MouseButton.RightButton:
-            self._try_delete_connection(cp)
+            # 右键开始切刀（点击就是单点；拖动形成切线）
+            self._cut_start = cp
+            self._cut_end = cp
+            self.update()
 
     def mouseMoveEvent(self, e: QMouseEvent):
         cp = self.to_canvas(QPointF(e.position()))
+
+        if self._cut_start is not None:
+            self._cut_end = cp
+            self.update()
+            return
 
         if self._pan_start is not None:
             delta = QPointF(e.pos() - self._pan_start)
@@ -451,6 +544,20 @@ class NodeCanvas(QWidget):
             self._drag_start = None
             self.update()
 
+        elif e.button() == Qt.MouseButton.RightButton:
+            if self._cut_start is not None and self._cut_end is not None:
+                # 短距离视为单击 → 删除附近一根连线
+                if (self._cut_end - self._cut_start).manhattanLength() < 6:
+                    self._try_delete_connection(self._cut_start)
+                else:
+                    # 切刀：删除所有相交连线
+                    n = self._cut_intersecting(self._cut_start, self._cut_end)
+                    if n > 0:
+                        self.graph_changed.emit()
+                self._cut_start = None
+                self._cut_end = None
+                self.update()
+
     def keyPressEvent(self, e: QKeyEvent):
         if e.key() == Qt.Key.Key_Delete:
             for iid in list(self._selected):
@@ -480,9 +587,9 @@ class NodeCanvas(QWidget):
     @staticmethod
     def _point_near_bezier(pt: QPointF, sp: QPointF, dp: QPointF,
                            threshold: float) -> bool:
-        dx = max(40.0, abs(dp.x() - sp.x()) * 0.5)
-        cp1 = QPointF(sp.x() + dx, sp.y())
-        cp2 = QPointF(dp.x() - dx, dp.y())
+        dist = max(50.0, abs(dp.x() - sp.x()) * 0.5)
+        cp1 = QPointF(sp.x() + dist, sp.y())
+        cp2 = QPointF(dp.x() - dist, dp.y())
         for t in [i / 20 for i in range(21)]:
             bx = (_lerp(_lerp(sp.x(), cp1.x(), t), _lerp(cp1.x(), cp2.x(), t), t) * (1 - t)
                   + _lerp(_lerp(cp1.x(), cp2.x(), t), _lerp(cp2.x(), dp.x(), t), t) * t)
