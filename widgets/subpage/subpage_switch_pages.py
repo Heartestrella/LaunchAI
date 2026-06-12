@@ -239,6 +239,8 @@ class NoInstallWidget(QWidget):
                 ["Real-ESRGAN"], from_git=(True, "https://github.com/xinntao/Real-ESRGAN"))
         elif self.package_name == "openai-whisper":
             self.pip = PipWorker(["openai-whisper"])  # 直接安装 最简单的一集
+        elif self.package_name == "ultralytics":
+            self.pip = PipWorker(["ultralytics"])
         self.pip.output_signal.connect(self._append_log)
         self.pip.finished_signal.connect(self.on_install_finished)
         self.pip.start()
@@ -328,6 +330,22 @@ class SwitchPage(QWidget):
             elif self.page_name == "whisper":
                 self.setObjectName("whisperInterface")
                 self.handel_whisper()
+            elif self.page_name == "yolo":
+                self.setObjectName("yoloInterface")
+                self.handel_yolo()
+
+    def handel_yolo(self):
+        from widgets.subpage.subpage_yolov import YoloInferencePage
+        self._real_page_0 = NoInstallWidget("ultralytics")
+        self._real_page_1 = YoloInferencePage(
+            self, device_options=CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        if not PipWorker.is_package_installed("ultralytics"):
+            self.switch_page(0)
+        else:
+            self.switch_page(1)
 
     def handel_demucs(self):
         from widgets.subpage.subpage_demucs import AudioSeparationWidget
@@ -345,7 +363,7 @@ class SwitchPage(QWidget):
             self.switch_page(1)
 
     def handel_ESRGAN(self):
-        from widgets.subpage.sub_page_ESRGAN import InferencePage
+        from widgets.subpage.subpage_ESRGAN import InferencePage
         self._real_page_0 = NoInstallWidget("Real-ESRGAN")
         self._real_page_1 = InferencePage(self, device_options=CUDA_DRIVERS)
         self.stacked_layout.addWidget(self._real_page_0)
