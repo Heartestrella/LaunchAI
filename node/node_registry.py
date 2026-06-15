@@ -207,6 +207,32 @@ _reg(NodeDef(
 ))
 
 _reg(NodeDef(
+    id="rvc",
+    title="RVC 变声/翻唱",
+    category="音频",
+    inputs=[
+        PortDef("audio_in", "音频输入", "audio"),
+    ],
+    outputs=[
+        PortDef("audio_out", "变声输出", "audio"),
+    ],
+    params={
+        "model_path":    "",
+        "index_path":    "",
+        "device":        "cuda:0",
+        "f0_method":     "rmvpe+",
+        "transpose":     0,
+        "index_rate":    0.75,
+        "filter_radius": 3,
+        "resample_sr":   0,
+        "rms_mix_rate":  0.25,
+        "protect":       0.33,
+        "split_infer":   False,
+        "format":        "wav",
+    },
+))
+
+_reg(NodeDef(
     id="audio_merge",
     title="音频合并",
     category="音频",

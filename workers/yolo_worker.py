@@ -116,7 +116,8 @@ class YoloWorker(QThread):
         p = self._params
 
         # ── 参数解析 ─────────────────────────────────────────────────
-        weights = p.get("weights",  "yolov8n.pt")
+        weights = p.get("weights",     "yolov8n.pt")
+        weights_dir = p.get("weights_dir", DEFAULT_WEIGHTS_DIR)
         imgsz = int(p.get("imgsz",     640))
         conf = float(p.get("conf",   0.25))
         iou = float(p.get("iou",    0.45))
@@ -144,26 +145,46 @@ class YoloWorker(QThread):
             return
 
         # ── 设备字符串规范化 ────────────────────────────────────────
-        # ultralytics 的 device 接受："cpu" / "0" / "0,1" / "cuda:0"
         if device in ("auto", ""):
-            ul_device = None              # 让 ultralytics 自己挑
+            ul_device = None
         elif device == "-1":
             ul_device = "cpu"
         else:
-            ul_device = device            # 直接用 "0" / "0,1"
+            ul_device = device
+
+        # ── 权重路径解析 ────────────────────────────────────────────
+        # 准备权重缓存目录（不存在则建）
+        weights_dir = os.path.abspath(weights_dir)
+        os.makedirs(weights_dir, exist_ok=True)
+
+        # 如果传的是纯文件名（不含路径分隔符且非绝对路径），
+        # 优先在 weights_dir 里找，找到就用绝对路径
+        if not os.path.isabs(weights) and not any(s in weights for s in ("/", "\\")):
+            candidate = os.path.join(weights_dir, weights)
+            if os.path.isfile(candidate):
+                weights = candidate
 
         # ── 加载模型 ─────────────────────────────────────────────────
         self.progress.emit(0, "加载模型…")
         self.log_line.emit(self._html(f"▶ 加载权重: {weights}", "#888888"))
+        self.log_line.emit(self._html(
+            f"  ↳ 缓存目录: {weights_dir}", "#888888"))
         t_load = time.time()
 
+        # 临时切换 cwd 到 weights_dir，
+        # 这样 ultralytics 触发自动下载时，文件会落到这里而不是项目根目录
+        old_cwd = os.getcwd()
         try:
-            self._model = YOLO(weights)
-        except Exception as e:
-            self.error.emit(f"模型加载失败: {e}")
-            return
+            os.chdir(weights_dir)
+            try:
+                self._model = YOLO(weights)
+            except Exception as e:
+                self.error.emit(f"模型加载失败: {e}")
+                return
+        finally:
+            os.chdir(old_cwd)
 
-        # 类别名（dict {id: name} 或 list）
+        # 后续不变…
         names = self._model.names
         if isinstance(names, dict):
             self._names = [names[i] for i in sorted(names.keys())]
@@ -479,8 +500,8 @@ def build_worker_from_ui_params(files: list[str], ui_params: dict,
             (".pt", ".onnx", ".engine")) else f"{model_field}.pt"
 
         # 优先查本地权重目录
-        local = os.path.join(weights_dir, stem)
-        weights = local if os.path.isfile(local) else stem
+        os.makedirs(weights_dir, exist_ok=True)
+        weights = os.path.abspath(os.path.join(weights_dir, stem))
 
     # device：UI 里若是 "GPU 0 · 0" 这种字串，page 已解析为 "0"/"-1"/"auto"
     device = str(ui_params.get("device", "auto"))
@@ -496,7 +517,7 @@ def build_worker_from_ui_params(files: list[str], ui_params: dict,
         "tta":        bool(ui_params.get("tta", False)),
         "agnostic":   bool(ui_params.get("agnostic", False)),
         "classes":    ui_params.get("classes", None),
-        "out_dir":    ui_params.get("out_dir", "./runs/detect"),
+        "out_dir":    ui_params.get("out_dir", "./results/detect"),
         "save_mode":  ui_params.get("save_mode", "图片+TXT(YOLO)"),
         "draw_boxes": bool(ui_params.get("draw_boxes", True)),
         "draw_label": bool(ui_params.get("draw_label", True)),

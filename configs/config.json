@@ -1,1 +1,84 @@
-{}
+{
+  "static_info": {
+    "cpu_name": "AMD Ryzen 5 5600X 6-Core Processor",
+    "cpu_cores": 6,
+    "cpu_threads": 12,
+    "cpu_freq_ghz": "—",
+    "cpu_base_freq": "—",
+    "ram_total": 34255331328,
+    "ram_type": "DDR4",
+    "ram_speed": "2666 MHz",
+    "ram_capacity_list": "16GB+16GB",
+    "ram_module_count": 2,
+    "disk_total": 4024487100416,
+    "disk_used": 1034274123776,
+    "disk_pct": 25.69952637366113,
+    "disk_partitions": [
+      {
+        "device": "C:\\",
+        "mountpoint": "C:\\",
+        "total": 511777435648,
+        "used": 280481267712,
+        "free": 231296167936,
+        "percent": 54.8
+      },
+      {
+        "device": "D:\\",
+        "mountpoint": "D:\\",
+        "total": 3000591446016,
+        "used": 462639648768,
+        "free": 2537951797248,
+        "percent": 15.4
+      },
+      {
+        "device": "E:\\",
+        "mountpoint": "E:\\",
+        "total": 256059109376,
+        "used": 170222100480,
+        "free": 85837008896,
+        "percent": 66.5
+      },
+      {
+        "device": "F:\\",
+        "mountpoint": "F:\\",
+        "total": 256059109376,
+        "used": 120931106816,
+        "free": 135128002560,
+        "percent": 47.2
+      }
+    ],
+    "os_display": "Windows 11 Pro (Build 26200)",
+    "hostname": "PC-20260517RPPP",
+    "arch": "AMD64",
+    "boot_time": "2026-06-11 21:59",
+    "gpu_name": "NVIDIA GeForce RTX 3060 Ti",
+    "gpu_vram": "8.0 GB",
+    "gpu_driver": "591.86",
+    "gpu_cuda_version": "13.1",
+    "gpu_type": "dedicated",
+    "pip_packages": {
+      "numpy": "2.2.6",
+      "pyqt6": "6.11.0",
+      "scipy": "1.15.3",
+      "torch": "2.5.1+cu118",
+      "torchaudio": "2.5.1+cu118",
+      "torchvision": "0.20.1+cu118"
+    },
+    "cpu_single_score": 0,
+    "cpu_multi_score": 0
+  },
+  "git_mirror_hosts": [
+    "https://git.13ee.icu"
+  ],
+  "installed": {
+    "Applio": true,
+    "demucs": true,
+    "GPT-SoVITS": true
+  },
+  "iopaint": {
+    "model": "mat",
+    "device": "cuda:0",
+    "hd_strategy": "CROP",
+    "hd_strategy_crop_margin": 112
+  }
+}

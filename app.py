@@ -1,19 +1,21 @@
 # coding:utf-8
+# isort: off
+# fmt: off
+
 
 import threading
-import subprocess
+import time
 import os
 import sys
 import traceback
 import sys
 import os
-from logger import info, warning, debug, error
-from utils.atool import resource_path
 
+sys.path.insert(0, os.getcwd())
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
+from utils.atool import resource_path
 current_path = os.environ.get("PATH", "")
 ffmpeg_path = resource_path(os.path.join("resource", "ffmepg", "bin"))
 if ffmpeg_path not in current_path:
@@ -51,8 +53,7 @@ threading.excepthook = lambda args: global_exception_hook(
 )
 
 
-# isort: off
-# fmt: off
+
 from PyQt6.QtGui import QFontDatabase, QFont
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout
@@ -62,11 +63,16 @@ from qfluentwidgets import (NavigationItemPosition, setTheme, Theme, FluentWindo
                             InfoBar)
 from widgets.subpage.subpage_demucs import AudioSeparationWidget
 from workers.demucs_worker import DemucsWorker
-from widgets.subpage.subpage_info_page import SystemInfoPage
+# from widgets.subpage.subpage_info_page import SystemInfoPage
 from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
 from widgets.subpage.subpage_switch_pages import SwitchPage
 from node.node_editor import NodeEditorPage
+from workers.pip_worker import PipWorker
+from logger import info, warning, debug, error
+
+CUDA_DRIVERS = PipWorker.get_torch_devices()
+info(f"获取到设备列表: {CUDA_DRIVERS}")
 
 class Widget(QWidget):
     def __init__(self, text: str, parent=None):
@@ -81,20 +87,35 @@ class Widget(QWidget):
 
 class Window(FluentWindow):
     def __init__(self):
+        t_super = time.perf_counter()
         super().__init__()
+        info(f"[init] super().__init__: {(time.perf_counter()-t_super)*1000:.0f} ms")
+
         self.resize(1316, 726)
         self.setMinimumSize(860, 600)
-        self.homeInterface = HomePage(self)
-        self.systemInfoInterface = SystemInfoPage(self)
-        self.settingInterface = SettingsWidget(self)
-        self.demucsinterface = SwitchPage("demucs",self)
-        self.ESRGANinterface = SwitchPage("ESRGAN",self)
-        self.whisperInterface = SwitchPage("whisper",self)
-        self.yoloInterface = SwitchPage("yolo",self)
-        self.nodeEditorInterface = NodeEditorPage(self)
+
+        _t = time.perf_counter()
+        def mark(name):
+            nonlocal _t
+            now = time.perf_counter()
+            info(f"[init] {name}: {(now-_t)*1000:.0f} ms")
+            _t = now
+
+        self.homeInterface       = HomePage(self);                                          mark("HomePage")
+        # self.systemInfoInterface = SystemInfoPage(self);                                    mark("SystemInfoPage")
+        self.settingInterface    = SettingsWidget(self);                                    mark("SettingsWidget")
+        self.demucsinterface     = SwitchPage("demucs",  CUDA_DRIVERS, self);               mark("SwitchPage demucs")
+        self.ESRGANinterface     = SwitchPage("ESRGAN",  CUDA_DRIVERS, self);               mark("SwitchPage ESRGAN")
+        self.whisperInterface    = SwitchPage("whisper", CUDA_DRIVERS, self);               mark("SwitchPage whisper")
+        self.rvcInterface        = SwitchPage("rvc",     CUDA_DRIVERS, self);               mark("SwitchPage rvc")
+        self.gptsovitsInterface  = SwitchPage("gptsovits", CUDA_DRIVERS, self);             mark("SwitchPage gptsovits")
+        self.yoloInterface       = SwitchPage("yolo",    CUDA_DRIVERS, self);               mark("SwitchPage yolo")
+        self.iopaintInterface    = SwitchPage("iopaint", CUDA_DRIVERS, self);               mark("SwitchPage iopaint")
+        self.nodeEditorInterface = NodeEditorPage(cuda_drivers=CUDA_DRIVERS, parent=self);  mark("NodeEditorPage")
+
         self.worker = None
-        self.initNavigation()
-        self.initWindow()
+        self.initNavigation();  mark("initNavigation")
+        self.initWindow();      mark("initWindow")
 
 
     def navigate_to(self, page_name: str):
@@ -102,11 +123,14 @@ class Window(FluentWindow):
         page_map = {
             "home": self.homeInterface,
             "setting": self.settingInterface,
-            "system": self.systemInfoInterface,
+            # "system": self.systemInfoInterface,
             "demucs": self.demucsinterface,
             "whisper": self.whisperInterface,
+            "rvc": self.rvcInterface,
+            "gptsovits": self.gptsovitsInterface,
             "node_editor": self.nodeEditorInterface,
             "yolo": self.yoloInterface,
+            "iopaint": self.iopaintInterface,
         }
         target = page_map.get(page_name)
         if target:
@@ -120,7 +144,7 @@ class Window(FluentWindow):
 
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '主页', )
-        self.addSubInterface(self.systemInfoInterface, FIF.INFO, '系统信息')
+        # self.addSubInterface(self.systemInfoInterface, FIF.INFO, '系统信息')
         self.addSubInterface(self.nodeEditorInterface, FIF.EDIT, '节点编辑器')
         audio_parent = Widget('音频', self)
         audio_parent.setObjectName("audioParent")
@@ -136,6 +160,24 @@ class Window(FluentWindow):
             self.whisperInterface,
             FIF.MICROPHONE,
             '语音识别 - Whisper',
+            parent=audio_parent
+        )
+
+        self.addSubInterface(
+            self.rvcInterface,
+            FIF.ALBUM,
+            'AI 变声 - RVC',
+            parent=audio_parent
+        )
+
+        # FIF 在不同 qfluentwidgets 版本里图标命名不一致，挑一个存在的
+        _gptsovits_icon = getattr(FIF, "MEGAPHONE", None) \
+            or getattr(FIF, "HEADPHONE", None) \
+            or getattr(FIF, "ROBOT", FIF.MICROPHONE)
+        self.addSubInterface(
+            self.gptsovitsInterface,
+            _gptsovits_icon,
+            '语音合成 - GPT-SoVITS',
             parent=audio_parent
         )
 
@@ -156,6 +198,17 @@ class Window(FluentWindow):
             self.yoloInterface,
             FIF.FILTER,
             '目标检测 - YOLO',
+            parent=image_parent
+        )
+
+        # FIF 在不同 qfluentwidgets 版本里图标命名不一致，挑一个存在的
+        _iopaint_icon = getattr(FIF, "BRUSH", None) \
+            or getattr(FIF, "PALETTE", None) \
+            or getattr(FIF, "PHOTO", FIF.EDIT)
+        self.addSubInterface(
+            self.iopaintInterface,
+            _iopaint_icon,
+            '图像修复 - IOPaint',
             parent=image_parent
         )
 

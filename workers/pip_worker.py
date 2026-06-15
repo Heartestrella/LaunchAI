@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import os
+import re
 import time
 import zipfile
 from logger import info, warning, debug, error
@@ -21,7 +22,9 @@ GIT_PROJECTS_ROOT = os.path.join(os.getcwd(), "_git_projects")
 cache_ = os.path.join(os.getcwd(), "torch_cache")
 fork_map = {
     "demucs": "main",
-    "Real-ESRGAN": "master"
+    "Real-ESRGAN": "master",
+    "Applio": "3.6.2",
+    "GPT-SoVITS": "main",
 }
 MIRROR_URLS = get_field("git_mirror_hosts", [])
 info(f"获取到GIT加速镜像: {MIRROR_URLS}")
@@ -31,8 +34,8 @@ class PipWorker(QThread):
     output_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, package_name: list = None, mirror_url: str = None, force: bool = False, is_torch: int = None, from_git: tuple = (False, "")):
-        """from_git : True/False 项目地址"""
+    def __init__(self, package_name: list = None, mirror_url: str = None, force: bool = False, is_torch: int = None, from_git: tuple = (False, "", "")):
+        """from_git : True/False 项目地址 tag version tag为空默认最新"""
         super().__init__()
         self.save_path = "./_cache"
         self.pip_worker = None
@@ -41,6 +44,8 @@ class PipWorker(QThread):
         self.force = force
         self.is_torch = is_torch
         self.from_git = from_git
+        self._is_cancelled = False
+        self._current_proc = None
 
     def _html(self, text, color=None, bold=False):
         """生成 HTML 格式文本"""
@@ -116,6 +121,7 @@ class PipWorker(QThread):
             errors='replace',
             env=env
         )
+        self._current_proc = process
 
         last_percent = -1
         last_time = None
@@ -124,6 +130,9 @@ class PipWorker(QThread):
         total = 0
 
         for line in iter(process.stdout.readline, ''):
+            if self._is_cancelled:
+                self._kill_proc(process)
+                break
             if not line:
                 break
 
@@ -209,6 +218,11 @@ class PipWorker(QThread):
                     '\r' + self._html("下载进度: 100% 完成", "#4CAF50", bold=True))
 
         process.wait()
+        self._current_proc = None
+
+        if self._is_cancelled:
+            self.finished_signal.emit(False, "已取消安装")
+            return
 
         if process.returncode == 0:
 
@@ -284,11 +298,11 @@ else:
                 torchaudio_version = "2.12.0"
 
             if package == "torch":
-                file_name = f"{package}-{torch_version}+cu{self.is_torch}-cp310-cp310-win_amd64.whl"
+                file_name = f"{package}-{torch_version}+cu{self.is_torch}-cp311-cp311-win_amd64.whl"
             elif package == "torchvision":
-                file_name = f"{package}-{torchvision_version}+cu{self.is_torch}-cp310-cp310-win_amd64.whl"
+                file_name = f"{package}-{torchvision_version}+cu{self.is_torch}-cp311-cp311-win_amd64.whl"
             elif package == "torchaudio":
-                file_name = f"{package}-{torchaudio_version}+cu{self.is_torch}-cp310-cp310-win_amd64.whl"
+                file_name = f"{package}-{torchaudio_version}+cu{self.is_torch}-cp311-cp311-win_amd64.whl"
             else:
                 continue
 
@@ -683,6 +697,15 @@ else:
             warning("没有可用的镜像")
         info("=" * 50)
 
+    def _emit_install_finished(self, package: str):
+        """安装结束时统一出口：被取消则发取消，否则发成功"""
+        if self._is_cancelled:
+            self.finished_signal.emit(False, "已取消安装")
+        else:
+            # 整条安装流水线跑完，才在配置里落 flag——比扫目录/算 MD5 都可靠
+            set_field(f"installed.{package}", True)
+            self.finished_signal.emit(True, f"{package} 源码安装成功")
+
     def install_from_git(self):
         git_url = self.from_git[1]
         package = self.package_name[0]  # 只处理单包
@@ -692,8 +715,8 @@ else:
         project_parent = GIT_PROJECTS_ROOT
         project_dir = os.path.join(project_parent, f"{package}_{fork}")
 
-        # 检查是否已经存在且有效
-        if os.path.exists(project_dir) and os.path.exists(os.path.join(project_dir, "setup.py")):
+        # 检查是否已经存在且有效（用 .git 目录判定，兼容无 setup.py 的仓库）
+        if os.path.exists(project_dir) and os.path.exists(os.path.join(project_dir, ".git")):
             self.output_signal.emit(self._html(
                 f"项目已存在，跳过克隆: {project_dir}", "#4CAF50"))
             project_root = project_dir
@@ -705,6 +728,10 @@ else:
                 self.output_signal.emit(self._html("克隆失败，回滚 PIP 安装", "red"))
                 return [PYTHON_PATH, "-m", "pip", "install", package]
             project_root = project_dir
+
+        if self._is_cancelled:
+            self._emit_install_finished(package)
+            return None
 
         # 后续处理：依赖安装、develop 模式
         # 他哥的 没注意到项目Real-ESRGAN-ncnn-vulkan 全白写了
@@ -754,7 +781,7 @@ else:
 
             # 执行 develop 安装 Real-ESRGAN
             self._run_setup_develop(project_root)
-            self.finished_signal.emit(True, f"{package} 源码安装成功")
+            self._emit_install_finished(package)
             return None
 
         elif package == "demucs":
@@ -766,12 +793,114 @@ else:
                         f.write("\nsoundfile\n")
                 self._run_pip_install(["-r", req_file])
             self._run_pip_install([project_root])
-            self.finished_signal.emit(True, f"{package} 源码安装成功")
+            self._emit_install_finished(package)
+            return None
+
+        elif package == "Applio":
+            # Applio 是仓库形式运行（python core.py ...），不是 pip 包，不需要 develop/install
+            # 仅处理依赖：过滤 torch* 后 pip install -r requirements.txt
+            req_file = os.path.join(project_root, "requirements.txt")
+            if os.path.exists(req_file):
+                self._filter_torch_requirements(req_file)
+                ok = self._run_pip_install(["-r", req_file])
+                if not ok and not self._is_cancelled:
+                    self.finished_signal.emit(False, f"{package} 依赖安装失败")
+                    return None
+            else:
+                self.output_signal.emit(self._html(
+                    f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
+            self._emit_install_finished(package)
+            return None
+
+        elif package == "GPT-SoVITS":
+            # 仓库形式运行：克隆 + 过滤 torch 后装 requirements.txt
+            # 预训练权重需用户自行放到 GPT_SoVITS/pretrained_models/，runner 启动时会校验
+            req_file = os.path.join(project_root, "requirements.txt")
+            # 上次失败留下的过滤后 requirements 会缺行,
+            # 先 git checkout 一下让本次过滤从原始内容开始。
+            if os.path.exists(os.path.join(project_root, ".git")):
+                try:
+                    subprocess.run(
+                        ["git", "checkout", "--", "requirements.txt"],
+                        cwd=project_root, capture_output=True, timeout=10)
+                except Exception as e:
+                    self.output_signal.emit(self._html(
+                        f"⚠️ 重置 requirements.txt 失败(将沿用现有内容): {e}", "#FF9800"))
+            if os.path.exists(req_file):
+                self._filter_torch_requirements(req_file)
+                # 剥掉需要本地 C/C++/CMake 编译且没 win-py311 预编译 wheel 的依赖,
+                # 后面用纯 Python / 预编译替代版单独装回来:
+                #   jieba_fast → jieba (纯 Python, requirements 里本来就有)
+                #   pyopenjtalk → pyopenjtalk-plus (drop-in, 有预编译 wheel)
+                #   opencc → opencc-python-reimplemented (纯 Python, API 兼容)
+                # opencc 这行 requirements 里同时有 `--no-binary=opencc` 选项行,
+                # _strip_requirements 会一并处理(否则强制源码编译同样失败)。
+                removed = self._strip_requirements(
+                    req_file, ("jieba_fast", "pyopenjtalk", "opencc"))
+                if removed:
+                    self.output_signal.emit(self._html(
+                        f"已从 requirements 移除: {', '.join(removed)}"
+                        "(将以纯 Python / 预编译替代版安装)",
+                        "#4FC3F7"))
+                ok = self._run_pip_install(["-r", req_file])
+                if not ok and not self._is_cancelled:
+                    self.finished_signal.emit(False, f"{package} 依赖安装失败")
+                    return None
+            else:
+                self.output_signal.emit(self._html(
+                    f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
+
+            # GPT-SoVITS 代码里硬编码 import pyopenjtalk / from opencc import OpenCC /
+            # from pytorch_lightning import LightningModule,但 upstream requirements.txt
+            # 不全。这里用预编译 / 纯 Python 替代并补齐遗漏:
+            #   pyopenjtalk-plus: tsukumijima 维护, 提供 win/mac/linux 预编译 wheel,
+            #                     模块名仍是 pyopenjtalk, 自带优化字典不需要首次联网下载
+            #   opencc-python-reimplemented: 纯 Python 实现, API 与 C++ 版 OpenCC 兼容
+            #   pytorch-lightning: GPT-SoVITS 推理用到 LightningModule, 但 requirements
+            #                      没列(upstream 漏写, 本来靠 funasr 等传递依赖带上)
+            self.output_signal.emit(self._html(
+                "正在安装 pyopenjtalk-plus(日文 G2P 预编译版)...", "#4FC3F7"))
+            ok_jtalk = self._run_pip_install(["pyopenjtalk-plus"])
+            self.output_signal.emit(self._html(
+                "正在安装 opencc-python-reimplemented(繁简转换纯 Python 版)...",
+                "#4FC3F7"))
+            ok_opencc = self._run_pip_install(["opencc-python-reimplemented"])
+            self.output_signal.emit(self._html(
+                "正在安装 pytorch-lightning(推理依赖,upstream requirements 遗漏)...",
+                "#4FC3F7"))
+            ok_pl = self._run_pip_install(["pytorch-lightning"])
+            if not (ok_jtalk and ok_opencc and ok_pl) and not self._is_cancelled:
+                self.output_signal.emit(self._html(
+                    "⚠️ 部分补装依赖失败,相关功能可能不可用", "#FF9800"))
+
+            # 源码里硬编码 `import jieba_fast`,该包是 jieba 的 C 加速 fork,
+            # 在 win-py311 上没有预编译 wheel,源码装也需要 VS Build Tools。
+            # 既然 requirements 里已经把 jieba_fast 剥掉换成 jieba(API 完全兼容),
+            # 这里把仓库源码里几处 `jieba_fast` 字面量也改成 `jieba`,
+            # 否则 inference_webui import 阶段就会 ModuleNotFoundError。
+            self._patch_gptsovits_source(project_root)
+
+            # 预下载英文 g2p 用到的 NLTK 资源。新版 nltk 的 pos_tag 找的是
+            # `averaged_perceptron_tagger_eng`(旧名 `averaged_perceptron_tagger`
+            # 没用),不预下载,中英混文本第一次推理就会 LookupError。
+            self.output_signal.emit(self._html(
+                "正在下载 NLTK 英文 g2p 资源(averaged_perceptron_tagger_eng / cmudict)...",
+                "#4FC3F7"))
+            self._run_subprocess([
+                PYTHON_PATH, "-m", "nltk.downloader", "-q",
+                "averaged_perceptron_tagger_eng", "cmudict",
+            ])
+
+            self.output_signal.emit(self._html(
+                "ℹ️ 请把预训练权重放到仓库 GPT_SoVITS/pretrained_models/ 目录,"
+                "下载地址见 https://github.com/RVC-Boss/GPT-SoVITS#pretrained-models",
+                "#4FC3F7"))
+            self._emit_install_finished(package)
             return None
 
         else:
             self._run_pip_install(["-e", project_root])
-            self.finished_signal.emit(True, f"{package} 源码安装成功")
+            self._emit_install_finished(package)
             return None
 
     def _clone_with_dulwich(self, repo_url: str, target_dir: str, branch: str = "master") -> bool:
@@ -787,8 +916,8 @@ else:
             是否克隆成功
         """
         try:
-            # 如果目录已存在且有效，跳过克隆
-            if os.path.exists(target_dir) and os.path.exists(os.path.join(target_dir, "setup.py")):
+            # 如果目录已存在且有效，跳过克隆（用 .git 目录判定）
+            if os.path.exists(target_dir) and os.path.exists(os.path.join(target_dir, ".git")):
                 self.output_signal.emit(self._html(
                     f"仓库已存在，跳过克隆: {target_dir}", "#4CAF50"))
                 return True
@@ -807,7 +936,7 @@ else:
 
             # 使用 Dulwich 克隆
             porcelain.clone(actual_url, target_dir,
-                            checkout=True, branch=branch)
+                            checkout=True, branch=branch, depth=1)
 
             self.output_signal.emit(self._html(
                 f"✅ 克隆成功: {target_dir}", "#4CAF50"))
@@ -849,17 +978,45 @@ else:
 
     def _run_pip_install(self, args: list) -> bool:
         """同步执行 pip install，将输出通过信号发送"""
+        if self._is_cancelled:
+            return False
         cmd = [PYTHON_PATH, "-m", "pip", "install"] + args
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, bufsize=1, encoding='utf-8', errors='replace')
+        self._current_proc = process
         for line in iter(process.stdout.readline, ''):
+            if self._is_cancelled:
+                self._kill_proc(process)
+                break
             if line.strip():
                 self.output_signal.emit(self._html(line.strip(), "#CCCCCC"))
         process.wait()
-        return process.returncode == 0
+        self._current_proc = None
+        return (not self._is_cancelled) and process.returncode == 0
+
+    def _run_subprocess(self, cmd: list, cwd: str = None) -> bool:
+        """同步执行任意 subprocess,把输出转成日志信号。失败返回 False(取消也算)。"""
+        if self._is_cancelled:
+            return False
+        process = subprocess.Popen(
+            cmd, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1, encoding='utf-8', errors='replace')
+        self._current_proc = process
+        for line in iter(process.stdout.readline, ''):
+            if self._is_cancelled:
+                self._kill_proc(process)
+                break
+            if line.strip():
+                self.output_signal.emit(self._html(line.strip(), "#CCCCCC"))
+        process.wait()
+        self._current_proc = None
+        return (not self._is_cancelled) and process.returncode == 0
 
     def _run_setup_develop(self, cwd: str) -> bool:
         """在指定目录执行 python setup.py develop"""
+        if self._is_cancelled:
+            return False
         self.output_signal.emit(self._html(
             f"执行 python setup.py develop in {cwd}", "#4FC3F7"))
         process = subprocess.Popen(
@@ -872,25 +1029,135 @@ else:
             encoding='utf-8',
             errors='replace'
         )
+        self._current_proc = process
         for line in iter(process.stdout.readline, ''):
+            if self._is_cancelled:
+                self._kill_proc(process)
+                break
             if line.strip():
                 self.output_signal.emit(self._html(line.strip(), "#CCCCCC"))
         process.wait()
-        return process.returncode == 0
+        self._current_proc = None
+        return (not self._is_cancelled) and process.returncode == 0
+
+    def _kill_proc(self, proc):
+        """优雅终止 subprocess：先 terminate，5s 不退强 kill"""
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                for _ in range(20):  # 5s 上限
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.25)
+                if proc.poll() is None:
+                    proc.kill()
+        except Exception as e:
+            error(f"终止子进程出错: {e}")
+
+    def cancel(self):
+        """用户主动取消：标记取消标志 + 立刻终止当前 subprocess"""
+        if self._is_cancelled:
+            return
+        self._is_cancelled = True
+        self.output_signal.emit(self._html("⚠️ 用户已请求取消，正在终止子进程...", "#FF9800"))
+        if self._current_proc is not None:
+            self._kill_proc(self._current_proc)
+        self.requestInterruption()
 
     def _filter_torch_requirements(self, req_path: str):
-        """从 requirements 文件中移除 torch/torchvision/torchaudio 行"""
+        """从 requirements 文件中移除 torch/torchvision/torchaudio 三件套。
+
+        精确匹配 distribution 名,不会误伤 pytorch-lightning / torchcrepe /
+        torchmetrics / pytorch-pretrained-bert 等带 torch 字串的其它包。
+        """
+        TORCH_CORE = {"torch", "torchvision", "torchaudio"}
         with open(req_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         filtered = []
         for line in lines:
-            line_stripped = line.strip()
-            if line_stripped and not line_stripped.startswith('#'):
-                if 'torch' in line_stripped.lower():
+            s = line.strip()
+            if s and not s.startswith('#') and not s.startswith('--'):
+                head = re.split(r'[<>=!;~\s\[]', s, maxsplit=1)[0].lower()
+                # 处理下划线 vs 短横线:torch_xxx 和 torch-xxx 都不该匹配,
+                # 三件套本身没有任何分隔符,直接小写比对就行
+                if head in TORCH_CORE:
                     continue
             filtered.append(line)
         with open(req_path, 'w', encoding='utf-8') as f:
             f.writelines(filtered)
+
+    def _strip_requirements(self, req_path: str, packages: tuple) -> list:
+        """从 requirements 文件里移除指定包(按 distribution 名匹配,大小写不敏感)。
+
+        同时处理 `--no-binary=pkg` 这类 pip 选项行,避免残留触发强制源码编译。
+        返回实际删掉的包名列表。
+        """
+        targets = tuple(p.lower() for p in packages)
+        removed = []
+
+        with open(req_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        def _hit(line: str) -> str:
+            s = line.strip()
+            if not s or s.startswith('#'):
+                return ""
+            if s.startswith('--no-binary'):
+                for pkg in targets:
+                    if pkg in s.lower():
+                        return pkg
+                return ""
+            head = re.split(r'[<>=!;~\s]', s, maxsplit=1)[0].lower()
+            return head if head in targets else ""
+
+        filtered = []
+        for line in lines:
+            pkg = _hit(line)
+            if pkg:
+                if pkg not in removed:
+                    removed.append(pkg)
+                continue
+            filtered.append(line)
+
+        with open(req_path, 'w', encoding='utf-8') as f:
+            f.writelines(filtered)
+        return removed
+
+    def _patch_gptsovits_source(self, project_root: str):
+        """把 GPT-SoVITS 源码里硬编码的 `jieba_fast` 改成 `jieba`。
+
+        jieba_fast 在 win-py311 上没有预编译 wheel,我们已用纯 Python 的 jieba 替代,
+        但仓库源码里(chinese.py / chinese2.py / tone_sandhi.py)还写着
+        `import jieba_fast`,启动时会 ModuleNotFoundError。
+        匹配 `jieba_fast` 整词(后面不能跟字母数字下划线),避免误伤其它命名。
+        """
+        targets = [
+            os.path.join(project_root, "GPT_SoVITS", "text", "chinese.py"),
+            os.path.join(project_root, "GPT_SoVITS", "text", "chinese2.py"),
+            os.path.join(project_root, "GPT_SoVITS", "text", "tone_sandhi.py"),
+        ]
+        pattern = re.compile(r'\bjieba_fast\b')
+        patched = []
+        for path in targets:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                if 'jieba_fast' not in content:
+                    continue
+                new_content = pattern.sub('jieba', content)
+                if new_content != content:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    patched.append(os.path.basename(path))
+            except Exception as e:
+                self.output_signal.emit(self._html(
+                    f"⚠️ 修补 {path} 失败: {e}", "#FF9800"))
+        if patched:
+            self.output_signal.emit(self._html(
+                f"✅ 已把 {', '.join(patched)} 里的 jieba_fast 替换为 jieba",
+                "#4CAF50"))
 
     @staticmethod
     def is_package_installed(package_name: str) -> bool:

@@ -13,7 +13,7 @@ from qfluentwidgets import (
     ElevatedCardWidget, CardWidget,
     TitleLabel, SubtitleLabel, BodyLabel, CaptionLabel, StrongBodyLabel,
     PrimaryPushButton, PushButton, TransparentPushButton, TransparentToolButton,
-    ToolButton, LineEdit as FLineEdit, SearchLineEdit,
+    ToolButton, LineEdit as FLineEdit, ComboBox,
     ProgressBar, SmoothScrollArea,
     InfoBar, InfoBarPosition,
     FluentIcon as FIF,
@@ -32,17 +32,22 @@ from PyQt6.QtCore import (
     Qt, QPoint, QRectF, QPropertyAnimation, QEasingCurve,
     QTimer, pyqtSignal
 )
+from PyQt6.QtWidgets import QFileDialog, QDialog, QDialogButtonBox, QVBoxLayout, QListWidget, QListWidgetItem
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 ACCENT = "#0078D4"
-
-
+_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir"}
+_DEVICE_PARAM_KEYS = {"device", "gpu", "gpu_id"}
+_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir"}
 # ══════════════════════════════════════════════════════════════════════
 #  Shift+A 节点选择弹出面板
 # ══════════════════════════════════════════════════════════════════════
+
 
 class NodePickerPanel(QWidget):
     """Shift+A 触发的节点选择器，点击即创建节点。"""
@@ -261,9 +266,10 @@ class PropertyPanel(QWidget):
 
     param_changed = pyqtSignal(str, str, object)   # iid, key, value
 
-    def __init__(self, graph: NodeGraph, parent=None):
+    def __init__(self, graph: NodeGraph, cuda_drivers: dict[str, str] | None = None, parent=None):
         super().__init__(parent)
         self.graph = graph
+        self.cuda_drivers = cuda_drivers or {"cpu": "cpu"}
         self._iid: str | None = None
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Expanding)
@@ -377,6 +383,43 @@ class PropertyPanel(QWidget):
         name.setStyleSheet("color:rgba(255,255,255,0.65);")
         lay.addWidget(name)
 
+        key_low = key.lower()
+
+        # ── 计算设备：下拉框 ─────────────────────────────────────────
+        if key_low in _DEVICE_PARAM_KEYS and self.cuda_drivers:
+            combo = ComboBox(row)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Fixed)
+            # 维护"显示名 → 设备字符串"的有序映射
+            items = list(self.cuda_drivers.items())   # [(display, value), ...]
+            combo.addItems([disp for disp, _ in items])
+
+            # 选中当前值（按 value 反查 display）
+            cur_val = str(val)
+            cur_disp = next(
+                (disp for disp, v in items if v == cur_val),
+                items[0][0]
+            )
+            combo.setCurrentText(cur_disp)
+            # 如果当前值不在列表里，立刻同步一次（让 graph 与 UI 一致）
+            if cur_val not in [v for _, v in items]:
+                sync_val = items[0][1]
+                self.graph.set_param(iid, key, sync_val)
+                self.param_changed.emit(iid, key, sync_val)
+
+            def _on_device_changed(idx, k=key, _items=items):
+                value = _items[idx][1]
+                self.graph.set_param(iid, k, value)
+                self.param_changed.emit(iid, k, value)
+            combo.currentIndexChanged.connect(_on_device_changed)
+
+            lay.addWidget(combo)
+            return row
+
+        # ── 文件 / 目录：LineEdit + 浏览按钮 ─────────────────────────
+        is_file = key_low in _FILE_PARAM_KEYS
+        is_dir = key_low in _DIR_PARAM_KEYS
+
         edit = FLineEdit(row)
         edit.setText(str(val))
         edit.setClearButtonEnabled(True)
@@ -384,9 +427,48 @@ class PropertyPanel(QWidget):
         def _h(text, k=key):
             self.graph.set_param(iid, k, text)
             self.param_changed.emit(iid, k, text)
-
         edit.textChanged.connect(_h)
-        lay.addWidget(edit)
+
+        if is_file or is_dir:
+            wrap = QWidget(row)
+            wlay = QHBoxLayout(wrap)
+            wlay.setContentsMargins(0, 0, 0, 0)
+            wlay.setSpacing(4)
+            wlay.addWidget(edit, 1)
+
+            browse = ToolButton(FIF.FOLDER, wrap)
+            browse.setFixedSize(30, 30)
+            browse.setToolTip("选择文件" if is_file else "选择目录")
+            wlay.addWidget(browse)
+
+            def _browse():
+                cur = edit.text().strip()
+                if is_file:
+                    node = self.graph.nodes.get(iid)
+                    title = node.title if node else ""
+                    tl = title.lower()
+                    if "音频" in title or "audio" in tl:
+                        flt = "音频 (*.mp3 *.wav *.flac *.m4a *.ogg);;所有文件 (*)"
+                    elif "图像" in title or "image" in tl:
+                        flt = "图像 (*.png *.jpg *.jpeg *.webp *.bmp);;所有文件 (*)"
+                    elif "视频" in title or "video" in tl:
+                        flt = "视频 (*.mp4 *.mov *.mkv *.avi);;所有文件 (*)"
+                    else:
+                        flt = "所有文件 (*)"
+                    path, _ = QFileDialog.getOpenFileName(
+                        self, "选择文件", cur, flt)
+                    if path:
+                        edit.setText(path)
+                else:
+                    d = QFileDialog.getExistingDirectory(
+                        self, "选择目录", cur)
+                    if d:
+                        edit.setText(d)
+            browse.clicked.connect(_browse)
+            lay.addWidget(wrap)
+        else:
+            lay.addWidget(edit)
+
         return row
 
 
@@ -394,9 +476,11 @@ class PropertyPanel(QWidget):
 #  主编辑器页面
 # ══════════════════════════════════════════════════════════════════════
 
+
 class NodeEditorPage(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, cuda_drivers: dict, parent=None):
         super().__init__(parent)
+        self.cuda_drivers = cuda_drivers
         self.setObjectName("NodeEditorPage")
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
@@ -483,7 +567,8 @@ class NodeEditorPage(QWidget):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         pc_lay.addWidget(prop_title)
 
-        self._prop_panel = PropertyPanel(self.graph, prop_container)
+        self._prop_panel = PropertyPanel(
+            self.graph, self.cuda_drivers, prop_container)
         self._prop_panel.setStyleSheet("color:#e0e0e0;")
         pc_lay.addWidget(self._prop_panel)
 

@@ -4,6 +4,7 @@ from PyQt6.QtWidgets import QStackedLayout, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt
 from qfluentwidgets import InfoBar, BodyLabel, IconWidget, TitleLabel, PrimaryPushButton, FluentIcon as FIF
 from workers.pip_worker import PipWorker
+from utils.configer import get_field
 import re
 from PyQt6.QtCore import QUrl, QTimer, pyqtSignal
 from PyQt6.QtGui import QTextCursor, QDesktopServices
@@ -21,9 +22,8 @@ if realesrgan:
     info(f"找到realesrgan-ncnn-vulkan 在: {realesrgan}")
 else:
     error(f"未找到realesrgan-ncnn-vulkan 可能需要从源码安装")
+
 info("获取CUDA DRIVER中")
-CUDA_DRIVERS = PipWorker.get_torch_devices()
-info(f"获取到设备列表: {CUDA_DRIVERS}")
 
 
 class LogTextEdit(TextEdit):
@@ -120,6 +120,16 @@ class NoInstallWidget(QWidget):
         elif package_name == "pytorch":
             description = "AIGC工具需要安装Pytorch 请前往设置安装后重启"
             button_text = "前往设置"
+        elif package_name == "Applio":
+            description = ("RVC 变声 / 翻唱 / 训练 由 Applio 项目驱动\n"
+                           "首次使用前需要从 GitHub 克隆源码并安装依赖")
+        elif package_name == "iopaint":
+            description = ("IOPaint 提供基于 LaMa/MAT/LDM 的图像擦除修复\n"
+                           "首次使用将自动下载 ~200MB 模型权重")
+        elif package_name == "GPT-SoVITS":
+            description = ("GPT-SoVITS 少样本 TTS / 音色克隆\n"
+                           "首次使用前需要从 GitHub 克隆源码并安装依赖\n"
+                           "预训练权重需放到 GPT_SoVITS/pretrained_models/")
         self.desc_label = BodyLabel(
             description,
             self
@@ -139,7 +149,13 @@ class NoInstallWidget(QWidget):
             self.install_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
         # 手动安装提示
-        self.manual_label = BodyLabel(f"pip install {package_name}", self)
+        if package_name == "Applio":
+            manual_text = "git clone https://github.com/IAHispano/Applio"
+        elif package_name == "GPT-SoVITS":
+            manual_text = "git clone https://github.com/RVC-Boss/GPT-SoVITS"
+        else:
+            manual_text = f"pip install {package_name}"
+        self.manual_label = BodyLabel(manual_text, self)
         self.manual_label.setStyleSheet("color: #888888; font-size: 11px;")
         self.manual_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(self.manual_label)
@@ -241,6 +257,14 @@ class NoInstallWidget(QWidget):
             self.pip = PipWorker(["openai-whisper"])  # 直接安装 最简单的一集
         elif self.package_name == "ultralytics":
             self.pip = PipWorker(["ultralytics"])
+        elif self.package_name == "Applio":
+            self.pip = PipWorker(
+                ["Applio"], from_git=(True, "https://github.com/IAHispano/Applio"))
+        elif self.package_name == "iopaint":
+            self.pip = PipWorker(["iopaint"])
+        elif self.package_name == "GPT-SoVITS":
+            self.pip = PipWorker(
+                ["GPT-SoVITS"], from_git=(True, "https://github.com/RVC-Boss/GPT-SoVITS"))
         self.pip.output_signal.connect(self._append_log)
         self.pip.finished_signal.connect(self.on_install_finished)
         self.pip.start()
@@ -253,7 +277,16 @@ class NoInstallWidget(QWidget):
                             parent=self.window(), duration=-1)
             self._install_finished()
         else:
-            InfoBar.error("安装失败", message, parent=self.window(), duration=-1)
+            # 失败 / 取消：恢复按钮状态，允许重试
+            if "取消" in message:
+                InfoBar.warning("已取消", message,
+                                parent=self.window(), duration=3000)
+                self._append_log(f"⏹️ {message}", "#FF9800")
+            else:
+                InfoBar.error("安装失败", message,
+                              parent=self.window(), duration=-1)
+                self._append_log(f"❌ 安装失败: {message}", "#F44336")
+            self._reset_ui()
 
     def _append_log(self, message: str, color: str = "#FFFFFF", format_html: bool = True):
         """添加日志"""
@@ -275,11 +308,14 @@ class NoInstallWidget(QWidget):
         self._append_log("日志已清空", "#888888")
 
     def _cancel_install(self):
-        """取消安装"""
-        if self.install_process and self.install_process.state() != 0:
-            self.install_process.terminate()
-        self._append_log("⚠️ 用户取消了安装", "#FF9800")
-        self._reset_ui()
+        """取消安装：通知 PipWorker 终止当前 subprocess"""
+        pip = getattr(self, "pip", None)
+        if pip is not None and pip.isRunning():
+            pip.cancel()
+            self._append_log("⚠️ 已请求取消安装，等待子进程退出...", "#FF9800")
+        else:
+            self._append_log("⚠️ 取消（当前无运行中的安装）", "#FF9800")
+            self._reset_ui()
 
     def _install_finished(self):
         """安装完成"""
@@ -307,38 +343,43 @@ class NoInstallWidget(QWidget):
 
 
 class SwitchPage(QWidget):
-    def __init__(self, page_name: str = None, parent=None):
+    def __init__(self, page_name: str, device_options: dict, parent=None, ):
         super().__init__(parent=parent)
+        self.CUDA_DRIVERS = device_options
         self.page_name = page_name
+        self.device_options = device_options
+        self.setObjectName(f"{page_name}Interface")
         self.stacked_layout = QStackedLayout(self)
         self.stacked_layout.setContentsMargins(0, 0, 0, 0)
         self.stacked_layout.setSpacing(0)
         self.handel_pytorch()
 
     def handel_pytorch(self):
-        if not PipWorker.is_package_installed("torch"):
+        # if len(self.CUDA_DRIVERS) == 1 and self.CUDA_DRIVERS.keys()[0] == "cpu":
+        if not self.CUDA_DRIVERS:
             self._real_page_0 = NoInstallWidget("pytorch")
-            self.setObjectName("SwitchPage")
             self.stacked_layout.addWidget(self._real_page_0)
         else:
             if self.page_name == "demucs":
-                self.setObjectName("demucsInterface")
                 self.handel_demucs()
             elif self.page_name == "ESRGAN":
-                self.setObjectName("ESRGANinterface")
                 self.handel_ESRGAN()
             elif self.page_name == "whisper":
-                self.setObjectName("whisperInterface")
                 self.handel_whisper()
             elif self.page_name == "yolo":
-                self.setObjectName("yoloInterface")
                 self.handel_yolo()
+            elif self.page_name == "rvc":
+                self.handel_rvc()
+            elif self.page_name == "iopaint":
+                self.handel_iopaint()
+            elif self.page_name == "gptsovits":
+                self.handel_gptsovits()
 
     def handel_yolo(self):
         from widgets.subpage.subpage_yolov import YoloInferencePage
         self._real_page_0 = NoInstallWidget("ultralytics")
         self._real_page_1 = YoloInferencePage(
-            self, device_options=CUDA_DRIVERS)
+            self, device_options=self.CUDA_DRIVERS)
         self.stacked_layout.addWidget(self._real_page_0)
         self.stacked_layout.addWidget(self._real_page_1)
         self._real_page_0.finish.connect(lambda: self.switch_page(1))
@@ -351,7 +392,7 @@ class SwitchPage(QWidget):
         from widgets.subpage.subpage_demucs import AudioSeparationWidget
         self._real_page_0 = NoInstallWidget("demucs")
         self._real_page_1 = AudioSeparationWidget(
-            self, device_options=CUDA_DRIVERS)
+            self, device_options=self.CUDA_DRIVERS)
         self._real_page_1.separationRequested.connect(
             self.window().start_separation)
         self.stacked_layout.addWidget(self._real_page_0)
@@ -365,7 +406,8 @@ class SwitchPage(QWidget):
     def handel_ESRGAN(self):
         from widgets.subpage.subpage_ESRGAN import InferencePage
         self._real_page_0 = NoInstallWidget("Real-ESRGAN")
-        self._real_page_1 = InferencePage(self, device_options=CUDA_DRIVERS)
+        self._real_page_1 = InferencePage(
+            self, device_options=self.CUDA_DRIVERS)
         self.stacked_layout.addWidget(self._real_page_0)
         self.stacked_layout.addWidget(self._real_page_1)
         self._real_page_0.finish.connect(lambda: self.switch_page(1))
@@ -380,7 +422,8 @@ class SwitchPage(QWidget):
     def handel_whisper(self):
         from widgets.subpage.subpage_whisper import WhisperWidget
         self._real_page_0 = NoInstallWidget("openai-whisper")
-        self._real_page_1 = WhisperWidget(self, device_options=CUDA_DRIVERS)
+        self._real_page_1 = WhisperWidget(
+            self, device_options=self.CUDA_DRIVERS)
         self.stacked_layout.addWidget(self._real_page_0)
         self.stacked_layout.addWidget(self._real_page_1)
         self._real_page_0.finish.connect(lambda: self.switch_page(1))
@@ -388,3 +431,42 @@ class SwitchPage(QWidget):
             self.switch_page(0)
         else:
             self.switch_page(1)
+
+    def handel_rvc(self):
+        from widgets.subpage.subpage_rvc import RVCWidget
+        self._real_page_0 = NoInstallWidget("Applio")
+        self._real_page_1 = RVCWidget(
+            self, device_options=self.CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        # 读 PipWorker 安装成功时写入的 flag，比扫目录可靠（克隆中断也不会误判）
+        installed = bool(get_field("installed.Applio", False))
+        info(f"Applio 安装检测: installed.Applio={installed}")
+        self.switch_page(1 if installed else 0)
+
+    def handel_iopaint(self):
+        from widgets.subpage.subpage_iopaint import IOPaintPage
+        self._real_page_0 = NoInstallWidget("iopaint")
+        self._real_page_1 = IOPaintPage(
+            self, device_options=self.CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        if not PipWorker.is_package_installed("iopaint"):
+            self.switch_page(0)
+        else:
+            self.switch_page(1)
+
+    def handel_gptsovits(self):
+        from widgets.subpage.subpage_gptsovits import GPTSoVITSWidget
+        self._real_page_0 = NoInstallWidget("GPT-SoVITS")
+        self._real_page_1 = GPTSoVITSWidget(
+            self, device_options=self.CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        # 与 Applio 一致：以 PipWorker 写入的 installed flag 为准
+        installed = bool(get_field("installed.GPT-SoVITS", False))
+        info(f"GPT-SoVITS 安装检测: installed.GPT-SoVITS={installed}")
+        self.switch_page(1 if installed else 0)

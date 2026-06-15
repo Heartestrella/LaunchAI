@@ -26,6 +26,8 @@ from qfluentwidgets import (ElevatedCardWidget,
                             ProgressRing, IndeterminateProgressRing,
                             isDarkTheme,
                             )
+import utils.configer as configer
+import time
 # ══════════════════════════════════════════════════════════════════════
 #  工具函数
 # ══════════════════════════════════════════════════════════════════════
@@ -74,7 +76,7 @@ def get_windows_version() -> str:
 
 class SystemInfoWorker(QThread):
     dataReady = pyqtSignal(dict)
-
+    _cpu_seeded = False
     # 静态信息缓存（类级别，所有实例共享）
     _static_info = None
     _static_lock = QMutex()
@@ -82,22 +84,28 @@ class SystemInfoWorker(QThread):
     def run(self):
         info = {}
 
-        # ========== 获取或缓存静态信息（只获取一次）==========
-
         self._static_lock.lock()
-        if SystemInfoWorker._static_info is None:
-            SystemInfoWorker._static_info = self._get_static_info()
-        static = SystemInfoWorker._static_info
-        self._static_lock.unlock()
+        try:
+            # 1) 类变量缓存（同一进程多次刷新）
+            if SystemInfoWorker._static_info is not None:
+                static = SystemInfoWorker._static_info
 
-        # 复制静态信息
+            else:
+                # 2) 磁盘配置缓存（跨进程）
+                cached = configer.get_field("static_info", {})
+                if cached:
+                    static = cached
+                    SystemInfoWorker._static_info = static
+                else:
+                    # 3) 都没有才真正采集（仅首次）
+                    static = self._get_static_info()
+                    SystemInfoWorker._static_info = static
+                    # _get_static_info 内部自己 set_field，这里不用重复
+        finally:
+            self._static_lock.unlock()
+
         info.update(static)
-
         self._update_dynamic_info(info)
-
-        # info_json = json.dumps(info, ensure_ascii=False, default=str)
-        # print(f"Info 大小: {len(info_json)/1024:.1f} KB, 字段数: {len(info)}")
-
         self.dataReady.emit(info)
 
     def _get_static_info(self):
@@ -200,13 +208,19 @@ class SystemInfoWorker(QThread):
         static["cpu_single_score"] = single
         static["cpu_multi_score"] = multi
 
+        configer.set_field("static_info", static)  # 缓存静态信息到配置文件
+
         return static
 
     def _update_dynamic_info(self, info):
         """更新动态信息（每次刷新都获取）"""
-
-        # CPU 使用率
-        info["cpu_usage"] = psutil.cpu_percent(interval=0.3)
+        # 首次种采样点，0.3s（只在进程生命周期内一次）
+        if not SystemInfoWorker._cpu_seeded:
+            psutil.cpu_percent(interval=None)        # 不阻塞
+            SystemInfoWorker._cpu_seeded = True
+            info["cpu_usage"] = 0.0
+        else:
+            info["cpu_usage"] = psutil.cpu_percent(interval=None)
 
         # CPU 当前频率（动态，会覆盖静态的 cpu_freq_ghz）
         freq = psutil.cpu_freq()
@@ -561,7 +575,7 @@ class DetailRow(QWidget):
 # ══════════════════════════════════════════════════════════════════════
 
 class DeviceRatingCard(ElevatedCardWidget):
-    """设备性能评分卡 - 评分标准由你实现"""
+    """设备性能评分卡"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -851,7 +865,10 @@ class SystemInfoPage(QWidget):
         self._auto_timer.setInterval(3000)
         self._auto_timer.timeout.connect(self._start_worker)
 
-        self._start_worker()
+        # self._start_worker()
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(3000)
+        self._auto_timer.timeout.connect(self._start_worker)
 
     # ── 线程启动 ──
     def _start_worker(self):
@@ -1170,6 +1187,23 @@ class SystemInfoPage(QWidget):
                 else:
                     widget.setText(
                         fmt_bytes(d.get('gpu_mem_used', 0) * 1024 * 1024))
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # 首次显示时，提示文案换成"正在采集"
+        if not self._cards_built:
+            self._loadLbl.setText("正在采集系统信息…")
+        # 立即触发一次采集
+        self._start_worker()
+        # 仅在卡片已建好的情况下启动定时刷新
+        # （首次采集完成后由 _onData 启动）
+        if self._cards_built and not self._auto_timer.isActive():
+            self._auto_timer.start()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        # 离开页面：停掉定时器，不再发起新一轮采集
+        self._auto_timer.stop()
 
     # ──────────────────────────────────────────────────────────────────
     def _copyInfo(self):

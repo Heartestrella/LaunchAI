@@ -8,3 +8,5 @@ torch_cache/
 __pycache__/
 _git_projects/*
 results/
+CLAUDE.md
+py311_embed/
