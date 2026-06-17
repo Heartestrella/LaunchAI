@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import QWidget, QApplication
 
 from node.node_registry import PORT_COLORS, REGISTRY
 from node.node_graph import NodeGraph, NodeInstance, Connection
+from node.node_preview import create_preview, detect_file_type, PREVIEW_W
 
 # ── 布局常量（对齐 LiteGraph 源码默认值） ─────────────────────────────
 NODE_W = 210
@@ -37,6 +38,11 @@ PORT_R = 4
 PORT_PAD = 10
 CORNER_R = 8
 SHADOW_OFF = 6
+PREVIEW_H = 140
+PREVIEW_PAD = 6
+RESIZE_HANDLE = 10        # 右下角拖拽热区尺寸(画布坐标)
+MIN_NODE_W = 140
+MIN_NODE_H = 60
 
 # FONT_TITLE = QFont("Arial", 11, QFont.Weight.Bold)
 # FONT_PORT = QFont("Arial", 9)
@@ -99,6 +105,16 @@ class NodeCanvas(QWidget):
         self._cut_start: QPointF | None = None
         self._cut_end:   QPointF | None = None
 
+        # 缩放节点
+        self._resize_node:   str | None = None
+        self._resize_start:  QPointF | None = None
+        self._resize_orig_w: float = 0
+        self._resize_orig_h: float = 0
+
+        # 预览 overlay
+        self._preview_widgets: dict[str, QWidget] = {}
+        self._preview_paths: dict[str, str] = {}
+
         self.setMinimumSize(800, 600)
         self._set_style()
 
@@ -114,14 +130,23 @@ class NodeCanvas(QWidget):
         return canvas * self._scale + self._offset
 
     # ── 节点几何 ──────────────────────────────────────────────────────
-    def node_rect(self, node: NodeInstance) -> QRectF:
+    def _auto_node_size(self, node: NodeInstance) -> tuple[float, float]:
         nd = node.definition
         n_ports = max(
             len(nd.inputs) if nd else 0,
             len(nd.outputs) if nd else 0
         )
+        w = NODE_W
         h = NODE_HEADER + max(n_ports, 1) * PORT_ROW_H + 8
-        return QRectF(node.x, node.y, NODE_W, h)
+        if node.def_id == "preview":
+            h += PREVIEW_H + PREVIEW_PAD
+        return w, h
+
+    def node_rect(self, node: NodeInstance) -> QRectF:
+        aw, ah = self._auto_node_size(node)
+        w = node.w if node.w > 0 else aw
+        h = node.h if node.h > 0 else ah
+        return QRectF(node.x, node.y, w, h)
 
     def port_pos(self, node: NodeInstance, port_name: str, is_output: bool) -> QPointF | None:
         nd = node.definition
@@ -152,6 +177,16 @@ class NodeCanvas(QWidget):
     def hit_node(self, canvas_pos: QPointF) -> str | None:
         for iid, node in reversed(list(self.graph.nodes.items())):
             if self.node_rect(node).contains(canvas_pos):
+                return iid
+        return None
+
+    def hit_resize(self, canvas_pos: QPointF) -> str | None:
+        for iid, node in reversed(list(self.graph.nodes.items())):
+            nr = self.node_rect(node)
+            grip = QRectF(nr.right() - RESIZE_HANDLE,
+                          nr.bottom() - RESIZE_HANDLE,
+                          RESIZE_HANDLE, RESIZE_HANDLE)
+            if grip.contains(canvas_pos):
                 return iid
         return None
 
@@ -203,6 +238,7 @@ class NodeCanvas(QWidget):
             p.drawLine(self._cut_start, self._cut_end)
 
         p.restore()
+        self._sync_preview_overlays()
 
     # ── 网格 ──────────────────────────────────────────────────────────
     def _draw_grid(self, p: QPainter):
@@ -333,6 +369,14 @@ class NodeCanvas(QWidget):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 port.label
             )
+
+        # 右下角缩放手柄
+        gx = nr.right() - 2
+        gy = nr.bottom() - 2
+        p.setPen(QPen(QColor(160, 160, 160, 100), 1))
+        for i in range(3):
+            off = (i + 1) * 3
+            p.drawLine(QPointF(gx - off, gy), QPointF(gx, gy - off))
 
     def _draw_port(self, p: QPainter, cx: float, cy: float, port_type: str):
         color = QColor(PORT_COLORS.get(port_type, "#AAAAAA"))
@@ -465,6 +509,22 @@ class NodeCanvas(QWidget):
                         self.update()
                         return
 
+            # 缩放手柄优先于节点拖拽
+            resize_iid = self.hit_resize(cp)
+            if resize_iid:
+                node = self.graph.nodes[resize_iid]
+                nr = self.node_rect(node)
+                self._resize_node = resize_iid
+                self._resize_start = cp
+                self._resize_orig_w = nr.width()
+                self._resize_orig_h = nr.height()
+                if resize_iid not in self._selected:
+                    self._selected.clear()
+                    self._selected.add(resize_iid)
+                    self.node_selected.emit(resize_iid)
+                self.update()
+                return
+
             iid = self.hit_node(cp)
             if iid:
                 if not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
@@ -508,10 +568,29 @@ class NodeCanvas(QWidget):
             self.update()
             return
 
+        if self._resize_node is not None and self._resize_start is not None:
+            delta = cp - self._resize_start
+            node = self.graph.nodes.get(self._resize_node)
+            if node:
+                aw, ah = self._auto_node_size(node)
+                new_w = max(aw, self._resize_orig_w + delta.x())
+                new_h = max(ah, self._resize_orig_h + delta.y())
+                node.w = new_w
+                node.h = new_h
+            self.update()
+            return
+
         if self._drag_node and self._drag_start:
             new_pos = cp - self._drag_start
             self.graph.move_node(self._drag_node, new_pos.x(), new_pos.y())
             self.update()
+            return
+
+        # 空闲时更新光标
+        if self.hit_resize(cp):
+            self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+        else:
+            self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
 
     def mouseReleaseEvent(self, e: QMouseEvent):
         cp = self.to_canvas(QPointF(e.position()))
@@ -540,6 +619,8 @@ class NodeCanvas(QWidget):
                 self._wire_cur = None
                 self._wire_hover = None
 
+            self._resize_node = None
+            self._resize_start = None
             self._drag_node = None
             self._drag_start = None
             self.update()
@@ -561,6 +642,7 @@ class NodeCanvas(QWidget):
     def keyPressEvent(self, e: QKeyEvent):
         if e.key() == Qt.Key.Key_Delete:
             for iid in list(self._selected):
+                self.remove_preview(iid)
                 self.graph.remove_node(iid)
             self._selected.clear()
             self.node_deselected.emit()
@@ -599,14 +681,103 @@ class NodeCanvas(QWidget):
                 return True
         return False
 
+    # ── 预览 overlay ────────────────────────────────────────────────
+    def _preview_area(self, node: NodeInstance) -> QRectF:
+        nd = node.definition
+        n_ports = max(len(nd.inputs) if nd else 0,
+                      len(nd.outputs) if nd else 0)
+        nr = self.node_rect(node)
+        top = nr.y() + NODE_HEADER + max(n_ports, 1) * PORT_ROW_H + 8 + PREVIEW_PAD
+        return QRectF(nr.x() + PREVIEW_PAD, top,
+                      nr.width() - PREVIEW_PAD * 2,
+                      nr.bottom() - top - PREVIEW_PAD)
+
+    def _sync_preview_overlays(self):
+        alive = set()
+        for iid, node in self.graph.nodes.items():
+            if node.def_id != "preview":
+                continue
+            alive.add(iid)
+            w = self._preview_widgets.get(iid)
+            if w is None:
+                continue
+            if self._scale < 0.35:
+                w.hide()
+                continue
+            area = self._preview_area(node)
+            tl = self.to_screen(QPointF(area.x(), area.y()))
+            br = self.to_screen(QPointF(area.right(), area.bottom()))
+            sw = max(20, int(br.x() - tl.x()))
+            sh = max(20, int(br.y() - tl.y()))
+            w.setGeometry(int(tl.x()), int(tl.y()), sw, sh)
+            w.show()
+
+        stale = set(self._preview_widgets.keys()) - alive
+        for iid in stale:
+            self.remove_preview(iid)
+
+    def update_preview(self, iid: str, path: str | None):
+        if path and path == self._preview_paths.get(iid):
+            return
+        self.remove_preview(iid)
+        if not path:
+            return
+        w = create_preview(path, self)
+        if w is None:
+            return
+        if not getattr(w, "INTERACTIVE", False):
+            w.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._preview_widgets[iid] = w
+        self._preview_paths[iid] = path
+        self.update()
+
+    def remove_preview(self, iid: str):
+        w = self._preview_widgets.pop(iid, None)
+        self._preview_paths.pop(iid, None)
+        if w is not None:
+            if hasattr(w, "cleanup"):
+                w.cleanup()
+            w.hide()
+            w.deleteLater()
+
+    def resolve_preview_path(self, node: NodeInstance) -> str | None:
+        path = node.params.get("path", "").strip()
+        if path:
+            return path
+        nd = node.definition
+        if nd is None:
+            return None
+        for port in nd.inputs:
+            for conn in self.graph.connections.values():
+                if conn.dst_iid == node.iid and conn.dst_port == port.name:
+                    src = self.graph.nodes.get(conn.src_iid)
+                    if src:
+                        for k in ("path", "file", "filepath"):
+                            v = src.params.get(k, "")
+                            if v and isinstance(v, str) and v.strip():
+                                return v.strip()
+        return None
+
+    def refresh_all_previews(self):
+        for iid, node in self.graph.nodes.items():
+            if node.def_id != "preview":
+                continue
+            path = self.resolve_preview_path(node)
+            self.update_preview(iid, path)
+
+    def clear_all_previews(self):
+        for iid in list(self._preview_widgets.keys()):
+            self.remove_preview(iid)
+
     # ── 公共方法 ──────────────────────────────────────────────────────
     def fit_view(self):
         if not self.graph.nodes:
             return
-        min_x = min(n.x for n in self.graph.nodes.values())
-        min_y = min(n.y for n in self.graph.nodes.values())
-        max_x = max(n.x + NODE_W for n in self.graph.nodes.values())
-        max_y = max(n.y + 120 for n in self.graph.nodes.values())
+        rects = [self.node_rect(n) for n in self.graph.nodes.values()]
+        min_x = min(r.x() for r in rects)
+        min_y = min(r.y() for r in rects)
+        max_x = max(r.right() for r in rects)
+        max_y = max(r.bottom() for r in rects)
         pad = 60
         cx = (min_x + max_x) / 2
         cy = (min_y + max_y) / 2

@@ -23,6 +23,8 @@ class NodeInstance:
     def_id:  str                        # 对应 NodeDef.id
     x:       float = 100.0
     y:       float = 100.0
+    w:       float = 0.0               # 自定义宽度 (0 = 自动)
+    h:       float = 0.0               # 自定义高度 (0 = 自动)
     params:  dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -81,6 +83,11 @@ class NodeGraph:
         if iid in self.nodes:
             self.nodes[iid].x = x
             self.nodes[iid].y = y
+
+    def resize_node(self, iid: str, w: float, h: float):
+        if iid in self.nodes:
+            self.nodes[iid].w = w
+            self.nodes[iid].h = h
 
     def set_param(self, iid: str, key: str, value: Any):
         if iid in self.nodes:

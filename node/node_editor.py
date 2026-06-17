@@ -570,6 +570,7 @@ class NodeEditorPage(QWidget):
         self._prop_panel = PropertyPanel(
             self.graph, self.cuda_drivers, prop_container)
         self._prop_panel.setStyleSheet("color:#e0e0e0;")
+        self._prop_panel.param_changed.connect(self._on_param_changed)
         pc_lay.addWidget(self._prop_panel)
 
         splitter.addWidget(prop_container)
@@ -594,12 +595,14 @@ class NodeEditorPage(QWidget):
         n5 = self.graph.add_node("file_output", 620, 180)
         n6 = self.graph.add_node("file_output", 620, 420)
         n7 = self.graph.add_node("file_input",   80, 560)
+        n8 = self.graph.add_node("preview",     620, 560)
 
         self.graph.add_connection(n1.iid, "file_out", n2.iid, "audio_in")
         self.graph.add_connection(n1.iid, "file_out", n3.iid, "audio_in")
         self.graph.add_connection(n2.iid, "vocals",   n5.iid, "file_in")
         self.graph.add_connection(n3.iid, "transcript", n6.iid, "file_in")
         self.graph.add_connection(n7.iid, "file_out", n4.iid, "image_in")
+        self.graph.add_connection(n4.iid, "image_out", n8.iid, "input")
 
         QTimer.singleShot(100, self._canvas.fit_view)
 
@@ -626,6 +629,21 @@ class NodeEditorPage(QWidget):
             parent=self, position=InfoBarPosition.BOTTOM_RIGHT, duration=1500
         )
 
+    def _on_param_changed(self, iid: str, key: str, value):
+        node = self.graph.nodes.get(iid)
+        if not node:
+            return
+        if node.def_id == "preview":
+            path = self._canvas.resolve_preview_path(node)
+            self._canvas.update_preview(iid, path)
+        else:
+            for conn in self.graph.connections.values():
+                if conn.src_iid == iid:
+                    dst = self.graph.nodes.get(conn.dst_iid)
+                    if dst and dst.def_id == "preview":
+                        path = self._canvas.resolve_preview_path(dst)
+                        self._canvas.update_preview(dst.iid, path)
+
     def _on_node_selected(self, iid: str):
         self._prop_panel.show_node(iid)
 
@@ -633,7 +651,7 @@ class NodeEditorPage(QWidget):
         self._prop_panel.clear_selection()
 
     def _on_graph_changed(self):
-        pass  # 可在此触发自动保存 / undo 堆栈等
+        self._canvas.refresh_all_previews()
 
     def _run_plan(self):
         self.graph.print_execution_plan()
@@ -646,6 +664,7 @@ class NodeEditorPage(QWidget):
         )
 
     def _clear_graph(self):
+        self._canvas.clear_all_previews()
         for iid in list(self.graph.nodes.keys()):
             self.graph.remove_node(iid)
         self._prop_panel.clear_selection()

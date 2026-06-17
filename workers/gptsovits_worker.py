@@ -40,7 +40,7 @@ class GPTSoVITSInferWorker(QThread):
                 - sovits_model:     SoVITS 权重 .pth 路径
                 - ref_audio:        参考音频 wav 路径(3~10s)
                 - ref_text:         参考音频文本
-                - ref_language:     参考语种 (中文/英文/日文/中英混/日英混/多语种混)
+                - ref_language:     参考语种 (中文/英文/日文/粤语/韩文/中英混合/日英混合/粤英混合/韩英混合/多语种混合/多语种混合(粤语))
                 - target_text:      目标文本
                 - target_language:  目标语种
                 - output:           输出 wav 路径

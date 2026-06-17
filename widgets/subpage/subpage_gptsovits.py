@@ -24,9 +24,13 @@ from workers.gptsovits_worker import GPTSoVITSInferWorker
 
 
 # GPT-SoVITS inference_webui 内部 i18n 默认就是中文字符串
-LANGUAGES = ["中文", "英文", "日文", "中英混", "日英混", "多语种混"]
-CUT_METHODS = ["不切", "凑四句一切", "凑50字一切", "按中文句号切",
-               "按英文句号切", "按标点符号切"]
+# 必须与 GPT-SoVITS inference_webui.dict_language_v2 / how_to_cut 的字面值一致，
+# 否则推理时 dict_language[text_language] 会 KeyError，how_to_cut 会静默不切。
+LANGUAGES = ["中文", "英文", "日文", "粤语", "韩文",
+             "中英混合", "日英混合", "粤英混合", "韩英混合",
+             "多语种混合", "多语种混合(粤语)"]
+CUT_METHODS = ["不切", "凑四句一切", "凑50字一切", "按中文句号。切",
+               "按英文句号.切", "按标点符号切"]
 
 
 class LogTextEdit(TextEdit):

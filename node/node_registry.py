@@ -152,6 +152,7 @@ _reg(NodeDef(
     inputs=[
         PortDef("input", "任意输入", "any"),
     ],
+    params={"path": ""},
 ))
 
 _reg(NodeDef(
@@ -246,18 +247,18 @@ _reg(NodeDef(
     params={"mode": "mix", "volume_a": 1.0, "volume_b": 1.0},
 ))
 
-_reg(NodeDef(
-    id="audio_trim",
-    title="音频裁剪",
-    category="音频",
-    inputs=[
-        PortDef("audio_in", "音频输入", "audio"),
-    ],
-    outputs=[
-        PortDef("audio_out", "音频输出", "audio"),
-    ],
-    params={"start_sec": 0.0, "end_sec": -1.0},
-))
+# _reg(NodeDef(
+#     id="audio_trim",
+#     title="音频裁剪",
+#     category="音频",
+#     inputs=[
+#         PortDef("audio_in", "音频输入", "audio"),
+#     ],
+#     outputs=[
+#         PortDef("audio_out", "音频输出", "audio"),
+#     ],
+#     params={"start_sec": 0.0, "end_sec": -1.0},
+# ))
 
 # ── 图像/视频节点 ─────────────────────────────────────────────────────
 
@@ -293,29 +294,29 @@ _reg(NodeDef(
     params={"width": 1920, "height": 1080, "keep_ratio": True},
 ))
 
-_reg(NodeDef(
-    id="video_extract_frames",
-    title="视频提帧",
-    category="图像/视频",
-    inputs=[
-        PortDef("video_in", "视频输入", "video"),
-    ],
-    outputs=[
-        PortDef("frames", "帧序列", "image", multi=True),
-    ],
-    params={"fps": 1, "format": "png"},
-))
+# _reg(NodeDef(
+#     id="video_extract_frames",
+#     title="视频提帧",
+#     category="图像/视频",
+#     inputs=[
+#         PortDef("video_in", "视频输入", "video"),
+#     ],
+#     outputs=[
+#         PortDef("frames", "帧序列", "image", multi=True),
+#     ],
+#     params={"fps": 1, "format": "png"},
+# ))
 
-_reg(NodeDef(
-    id="frames_to_video",
-    title="帧合成视频",
-    category="图像/视频",
-    inputs=[
-        PortDef("frames",   "帧序列", "image", multi=True),
-        PortDef("audio_in", "音轨（可选）", "audio"),
-    ],
-    outputs=[
-        PortDef("video_out", "视频输出", "video"),
-    ],
-    params={"fps": 24, "codec": "h264", "crf": 18},
-))
+# _reg(NodeDef(
+#     id="frames_to_video",
+#     title="帧合成视频",
+#     category="图像/视频",
+#     inputs=[
+#         PortDef("frames",   "帧序列", "image", multi=True),
+#         PortDef("audio_in", "音轨（可选）", "audio"),
+#     ],
+#     outputs=[
+#         PortDef("video_out", "视频输出", "video"),
+#     ],
+#     params={"fps": 24, "codec": "h264", "crf": 18},
+# ))

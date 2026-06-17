@@ -79,13 +79,14 @@ def main():
     parser.add_argument("--ref-audio", required=True, help="参考音频 wav 路径(3~10s)")
     parser.add_argument("--ref-text", required=True, help="参考音频对应文本")
     parser.add_argument("--ref-language", default="中文",
-                        help="参考文本语种 中文/英文/日文/中英混/日英混/多语种混")
+                        help="参考文本语种，必须与 inference_webui.dict_language_v2 的键一致，"
+                             "如 中文/英文/日文/粤语/韩文/中英混合/日英混合/粤英混合/韩英混合/多语种混合/多语种混合(粤语)")
     parser.add_argument("--target-text", required=True, help="待合成目标文本")
     parser.add_argument("--target-language", default="中文",
-                        help="目标文本语种")
+                        help="目标文本语种（同 --ref-language 的取值集合）")
     parser.add_argument("--output", required=True, help="输出 wav 路径")
     parser.add_argument("--how-to-cut", default="不切",
-                        help="切分策略：不切/凑四句一切/凑50字一切/按中文句号切/按英文句号切/按标点符号切")
+                        help="切分策略：不切/凑四句一切/凑50字一切/按中文句号。切/按英文句号.切/按标点符号切")
     parser.add_argument("--top-k", type=int, default=15)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--temperature", type=float, default=1.0)
