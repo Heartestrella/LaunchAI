@@ -9,7 +9,8 @@ from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QTextCursor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-    QStackedWidget,
+    QStackedWidget, QDialog, QDialogButtonBox,
+    QListWidget, QListWidgetItem, QAbstractItemView,
 )
 
 from qfluentwidgets import (
@@ -19,6 +20,151 @@ from qfluentwidgets import (
     ProgressBar, SmoothScrollArea, CardWidget, ExpandGroupSettingCard,
     IconWidget, InfoBar, FluentIcon as FIF, TextEdit, Pivot,
 )
+
+
+# GPT-SoVITS .list 文件每行格式：vocal_path|speaker_name|language|text
+# 语言代码 → UI 下拉框使用的中文名（dict_language_v2 的字面值）
+_LIST_LANG_MAP = {
+    "zh":  "中文",
+    "en":  "英文",
+    "ja":  "日文",
+    "ko":  "韩文",
+    "yue": "粤语",
+    "all_zh":  "中文",
+    "all_en":  "英文",
+    "all_ja":  "日文",
+    "all_ko":  "韩文",
+    "all_yue": "粤语",
+}
+
+
+def parse_sovits_list_file(list_path: str) -> list[dict]:
+    """解析 GPT-SoVITS 数据集 .list 文件。
+
+    每行格式: ``vocal_path|speaker_name|language|text``
+
+    - 字段不足 4 段或纯注释/空行会被跳过；
+    - 路径若为相对路径，按 .list 所在目录解析；
+    - **音频是否存在**只作为标记保留在 ``exists`` 字段里，不再过滤掉。
+      让 UI 自己决定怎么提示缺文件的条目（一般是灰显不可选）。
+
+    Returns:
+        ``[{"audio": abs_path, "speaker": str, "lang": cn_name,
+            "text": str, "exists": bool}, ...]``
+    """
+    entries: list[dict] = []
+    base_dir = os.path.dirname(os.path.abspath(list_path))
+    try:
+        with open(list_path, "r", encoding="utf-8") as f:
+            raw_lines = f.readlines()
+    except UnicodeDecodeError:
+        # 极少数 .list 是 GBK 编码（早期 Windows 工具产出）
+        with open(list_path, "r", encoding="gbk", errors="ignore") as f:
+            raw_lines = f.readlines()
+
+    for line in raw_lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 4:
+            continue
+        audio_raw, speaker, lang_code, text = parts[0], parts[1], parts[2], "|".join(parts[3:])
+
+        audio_path = audio_raw.strip().replace("\\", "/")
+        if not os.path.isabs(audio_path):
+            audio_path = os.path.normpath(os.path.join(base_dir, audio_path))
+
+        entries.append({
+            "audio":   audio_path,
+            "speaker": speaker.strip(),
+            "lang":    _LIST_LANG_MAP.get(lang_code.strip().lower(), ""),
+            "text":    text.strip(),
+            "exists":  os.path.isfile(audio_path),
+        })
+    return entries
+
+
+class ListEntryPickerDialog(QDialog):
+    """从 .list 文件多条参考音频中选一条。
+
+    存在的条目正常显示并可选；找不到音频文件的条目灰显且不可选，
+    用户能直观看到"有多少行因为音频缺失而不可用"。
+    """
+
+    def __init__(self, entries: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择参考音频条目")
+        self.resize(640, 460)
+
+        self._entries = entries
+        self._selected: dict | None = None
+
+        total   = len(entries)
+        missing = sum(1 for e in entries if not e.get("exists", True))
+        usable  = total - missing
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        summary = f".list 共 {total} 条，可用 {usable} 条"
+        if missing:
+            summary += f"，缺失 {missing} 条（灰色不可选）"
+        layout.addWidget(StrongBodyLabel(summary, self))
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setAlternatingRowColors(True)
+
+        first_usable = -1
+        for i, e in enumerate(entries):
+            text_preview = e["text"]
+            if len(text_preview) > 60:
+                text_preview = text_preview[:60] + "…"
+            label = f"[{e['speaker'] or '?'} · {e['lang'] or '?'}]  {text_preview}"
+            if not e.get("exists", True):
+                label = "⚠ 缺失  " + label
+            item = QListWidgetItem(label)
+            if e.get("exists", True):
+                item.setToolTip(f"{e['audio']}\n\n{e['text']}")
+                if first_usable < 0:
+                    first_usable = i
+            else:
+                # 灰显 + 不可选，避免用户误选到无法读取的音频
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable
+                                           & ~Qt.ItemFlag.ItemIsEnabled)
+                item.setToolTip(f"音频文件不存在:\n{e['audio']}")
+            self._list.addItem(item)
+        if first_usable >= 0:
+            self._list.setCurrentRow(first_usable)
+        self._list.itemDoubleClicked.connect(self._on_accept)
+        layout.addWidget(self._list, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self, *_):
+        row = self._list.currentRow()
+        if 0 <= row < len(self._entries):
+            entry = self._entries[row]
+            # 双保险：双击灰条目时 currentRow 仍可能落上，这里再过滤一次
+            if entry.get("exists", True):
+                self._selected = entry
+                self.accept()
+                return
+        # 没有有效选择就不关闭，让用户重新选
+        self.reject()
+
+    @property
+    def selected(self) -> dict | None:
+        return self._selected
 
 from workers.gptsovits_worker import GPTSoVITSInferWorker
 
@@ -614,13 +760,54 @@ class TTSInferTab(QWidget):
 
     def _pick_ref_audio(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择参考音频", "",
-            "音频文件 (*.wav *.mp3 *.flac);;所有文件 (*)")
-        if path:
-            self._ref_audio_path = path
-            self._ref_tag.setText(Path(path).name)
-            self._ref_tag.setToolTip(path)
-            self._ref_tag.setStyleSheet("color: #4CAF50;")
+            self, "选择参考音频或 .list 数据集", "",
+            "音频或数据集 (*.wav *.mp3 *.flac *.list);;"
+            "音频文件 (*.wav *.mp3 *.flac);;"
+            "数据集列表 (*.list);;所有文件 (*)")
+        if not path:
+            return
+
+        # .list 数据集：解析后弹窗让用户选一条，同时回填参考文本/语种
+        if path.lower().endswith(".list"):
+            try:
+                entries = parse_sovits_list_file(path)
+            except Exception as e:
+                InfoBar.error("解析失败", f".list 解析出错: {e}", parent=self)
+                return
+            if not entries:
+                # 一行都没解析成功 —— 格式问题
+                InfoBar.warning(
+                    "未找到可用条目",
+                    "该 .list 文件没有可识别的记录（字段格式不符）",
+                    parent=self,
+                )
+                return
+            if not any(e.get("exists") for e in entries):
+                # 解析得到条目，但音频全都对不上路径 —— 弹窗里依然显示，
+                # 同时给一条警告解释问题，避免用户陷入"看到列表却全灰"的困惑
+                InfoBar.warning(
+                    "音频文件均不存在",
+                    f"解析到 {len(entries)} 条记录，但音频路径全部失效（请检查 .list 中的路径或数据集是否完整）",
+                    parent=self,
+                )
+
+            dlg = ListEntryPickerDialog(entries, parent=self)
+            if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected is None:
+                return
+            entry = dlg.selected
+            path = entry["audio"]
+            # 顺手回填参考文本和参考语种（用户仍可手动改）
+            if entry["text"]:
+                self._ref_text_edit.setPlainText(entry["text"])
+            if entry["lang"]:
+                idx = self.ref_lang_combo.findText(entry["lang"])
+                if idx >= 0:
+                    self.ref_lang_combo.setCurrentIndex(idx)
+
+        self._ref_audio_path = path
+        self._ref_tag.setText(Path(path).name)
+        self._ref_tag.setToolTip(path)
+        self._ref_tag.setStyleSheet("color: #4CAF50;")
 
     def _pick_output_dir(self):
         path = QFileDialog.getExistingDirectory(self, "选择输出目录")

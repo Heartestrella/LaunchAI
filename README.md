@@ -17,10 +17,8 @@
 ## 功能
 
 - 基于 [QFluentWidgets](https://qfluentwidgets.com/) 的 Fluent 风格界面 深色 / 浅色主题一键切换
-- 首页展示 CPU / 内存 / 磁盘 / GPU / CUDA 驱动等系统信息
 - 自动依赖安装：pip 源 + 阿里云 PyTorch wheel 直链 + dulwich Git 克隆 + 镜像探测排序
-- 节点编辑器（预览）：ComfyUI 风格的可视化连线工作流 `Shift+A` 调出节点选择器
-- PyInstaller 打包兼容 所有资源访问走 `utils.atool.resource_path`
+- 节点编辑器（测试）：ComfyUI 风格的可视化连线工作流 `Shift+A` 调出节点选择器
 
 ---
 
@@ -31,29 +29,42 @@
 | 音频 | **Demucs** | 音轨分离 | [facebookresearch/demucs](https://github.com/facebookresearch/demucs) |
 | 音频 | **Whisper** | 语音识别 / 字幕生成 | [openai/whisper](https://github.com/openai/whisper) |
 | 音频 | **RVC** | AI 变声 / 翻唱 | [Applio](https://github.com/IAHispano/Applio) / [rvc-inferpy](https://pypi.org/project/rvc-inferpy/) |
+| 音频 | **GPT-SoVITS** | 语音合成 / 少样本声音克隆 | [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) |
 | 图像 | **Real-ESRGAN** | 图像超分辨率 内置 ncnn 推理 | [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) |
-| 图像 | **YOLO** | 目标检测 | [ultralytics](https://github.com/ultralytics/ultralytics) |
+| 图像 | **YOLO** | 目标检测 当前支持图像 视频在做 | [ultralytics](https://github.com/ultralytics/ultralytics) |
+| 图像 | **IOPaint** | 图像修复 / 对象擦除 / 水印去除 | [Sanster/IOPaint](https://github.com/Sanster/IOPaint) |
 
 ---
 
+
+
 ## 环境要求
 
-- Windows 10 / 11
-- Python 3.10（推荐使用仓库内置 `qt_venv/`）
+- Windows 10 / 11 (目前仅限Windows)
+- Python 3.11
 - NVIDIA + CUDA（可选 无 GPU 时部分工具回退 CPU）
 - 磁盘 10 GB+
+
+---
+
+## 发展
+
+- 添加对SD的整合与管理
+- 添加对LLM的支持
+- 添加更多有用的工具
+- 如果您对发展有建议 可以提交issue
 
 ---
 
 ## 运行
 
 ```bash
-qt_venv\Scripts\python.exe app.py
+python app.py
 ```
 
-> ⚠️ 必须使用 `qt_venv` 内的解释器 Worker 通过 `sys.executable` 调用 CLI 外部解释器找不到依赖
+> ⚠️ 当前尚未整理出requirements.txt
+> 后续会在发行版中放出打包环境后的整合包
 
-首次进入工具页时若依赖未安装 会弹出安装引导 点击即可自动部署
 
 ---
 
@@ -76,10 +87,10 @@ resource/              字体 FFmpeg NCNN QSS
 
 集成的 AI 模型与可执行文件版权归原作者所有 本项目仅作为统一前端
 
-[demucs](https://github.com/facebookresearch/demucs) · [whisper](https://github.com/openai/whisper) · [RVC-Project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) · [Applio](https://github.com/IAHispano/Applio) · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [ultralytics](https://github.com/ultralytics/ultralytics) · [QFluentWidgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets) · [FFmpeg](https://ffmpeg.org/)
+[demucs](https://github.com/facebookresearch/demucs) · [whisper](https://github.com/openai/whisper) · [RVC-Project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) · [Applio](https://github.com/IAHispano/Applio) · [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [ultralytics](https://github.com/ultralytics/ultralytics) · [IOPaint](https://github.com/Sanster/IOPaint) · [QFluentWidgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets) · [FFmpeg](https://ffmpeg.org/)
 
 ---
 
 ## 许可
 
-尚未指定开源许可证 请勿用于商业用途 如需协作或二次分发请联系 [@Heartestrella](https://github.com/Heartestrella)
+使用GNU General Public License v3.0 许可证 严禁商用 [@Heartestrella](https://github.com/Heartestrella)

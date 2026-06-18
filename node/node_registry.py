@@ -59,6 +59,9 @@ class NodeDef:
     outputs:  list[PortDef] = field(default_factory=list)
     # 可选：节点特有的参数字段（供 PropertyPanel 渲染）
     params:   dict[str, Any] = field(default_factory=dict)
+    # 可选：参数枚举选项 {param_key: [可选值, ...]}
+    # PropertyPanel 见到则渲染为下拉框；首项当作默认。
+    param_choices: dict[str, list] = field(default_factory=dict)
 
     @property
     def color(self) -> str:
@@ -133,6 +136,8 @@ _reg(NodeDef(
         PortDef("file_out", "输出", "file"),
     ],
     params={"target_format": "wav"},
+    param_choices={"target_format": ["wav", "mp3", "flac",
+                                     "png", "jpg", "mp4"]},
 ))
 
 _reg(NodeDef(
@@ -180,10 +185,15 @@ _reg(NodeDef(
     ],
     params={
         "model":   "htdemucs",
-        "device":  "cuda",
+        "device":  "cpu",          # 默认安全值；GPU 由属性面板下拉显式选择
         "shifts":  1,
         "overlap": 0.25,
         "format":  "wav",
+    },
+    param_choices={
+        "model":  ["htdemucs", "htdemucs_ft", "mdx",
+                   "mdx_extra", "mdx_q", "mdx_extra_q"],
+        "format": ["wav", "mp3", "flac"],
     },
 ))
 
@@ -202,8 +212,13 @@ _reg(NodeDef(
     params={
         "model":      "large-v3",
         "language":   "auto",
-        "device":     "cuda",
+        "device":     "cpu",
         "task":       "transcribe",
+    },
+    param_choices={
+        "model": ["tiny", "base", "small", "medium",
+                  "large", "large-v2", "large-v3"],
+        "task":  ["transcribe", "translate"],
     },
 ))
 
@@ -220,7 +235,7 @@ _reg(NodeDef(
     params={
         "model_path":    "",
         "index_path":    "",
-        "device":        "cuda:0",
+        "device":        "cpu",
         "f0_method":     "rmvpe+",
         "transpose":     0,
         "index_rate":    0.75,
@@ -230,6 +245,10 @@ _reg(NodeDef(
         "protect":       0.33,
         "split_infer":   False,
         "format":        "wav",
+    },
+    param_choices={
+        "f0_method": ["rmvpe", "rmvpe+", "crepe", "pm", "harvest"],
+        "format":    ["wav", "mp3", "flac"],
     },
 ))
 
@@ -278,6 +297,13 @@ _reg(NodeDef(
         "tile":    512,
         "gpu_id":  "auto",
         "fmt":     "png",
+    },
+    param_choices={
+        "model": ["realesrgan-x4plus", "realesrgan-x4plus-anime",
+                  "realesr-animevideov3", "RealESRGAN_x4plus",
+                  "RealESRGAN_x4plus_anime_6B", "RealESRNet_x4plus"],
+        "scale": [2, 3, 4],
+        "fmt":   ["png", "jpg", "webp"],
     },
 ))
 

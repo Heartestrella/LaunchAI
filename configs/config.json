@@ -80,5 +80,8 @@
     "device": "cuda:0",
     "hd_strategy": "CROP",
     "hd_strategy_crop_margin": 112
+  },
+  "node_editor": {
+    "last_file": "C:/Users/Administrator/Desktop/LaunchAI/configs/untitled.node"
   }
 }

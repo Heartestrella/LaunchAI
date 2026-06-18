@@ -31,8 +31,10 @@ Wraps popular open-source AI projects behind a single desktop UI with managed in
 | Audio | **Demucs** | Stem separation | [facebookresearch/demucs](https://github.com/facebookresearch/demucs) |
 | Audio | **Whisper** | Speech recognition / subtitles | [openai/whisper](https://github.com/openai/whisper) |
 | Audio | **RVC** | AI voice conversion | [Applio](https://github.com/IAHispano/Applio) / [rvc-inferpy](https://pypi.org/project/rvc-inferpy/) |
+| Audio | **GPT-SoVITS** | Text-to-speech / few-shot voice cloning | [RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) |
 | Image | **Real-ESRGAN** | Image super-resolution with bundled ncnn | [xinntao/Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) |
-| Image | **YOLO** | Object detection | [ultralytics](https://github.com/ultralytics/ultralytics) |
+| Image | **YOLO** | Object detection — images supported video WIP | [ultralytics](https://github.com/ultralytics/ultralytics) |
+| Image | **IOPaint** | Inpainting / object removal / watermark removal | [Sanster/IOPaint](https://github.com/Sanster/IOPaint) |
 
 ---
 
@@ -77,7 +79,7 @@ resource/              Fonts FFmpeg NCNN binaries QSS
 
 All bundled AI models and binaries belong to their original authors — LaunchAI is just a unified frontend
 
-[demucs](https://github.com/facebookresearch/demucs) · [whisper](https://github.com/openai/whisper) · [RVC-Project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) · [Applio](https://github.com/IAHispano/Applio) · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [ultralytics](https://github.com/ultralytics/ultralytics) · [QFluentWidgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets) · [FFmpeg](https://ffmpeg.org/)
+[demucs](https://github.com/facebookresearch/demucs) · [whisper](https://github.com/openai/whisper) · [RVC-Project](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) · [Applio](https://github.com/IAHispano/Applio) · [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) · [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) · [ultralytics](https://github.com/ultralytics/ultralytics) · [IOPaint](https://github.com/Sanster/IOPaint) · [QFluentWidgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets) · [FFmpeg](https://ffmpeg.org/)
 
 ---
 

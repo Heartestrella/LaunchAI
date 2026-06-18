@@ -167,6 +167,77 @@ class NodeGraph:
     def remove_connection(self, cid: str):
         self.connections.pop(cid, None)
 
+    # ── 序列化 / 反序列化 ───────────────────────────────────────────
+    #  ``.node`` 文件即 ``to_dict()`` 的 JSON 形式；版本号留作日后字段演进。
+
+    SERIALIZE_VERSION = 1
+
+    def to_dict(self) -> dict:
+        """将整张图导出为可 JSON 序列化的 dict。"""
+        return {
+            "version": self.SERIALIZE_VERSION,
+            "nodes": [
+                {
+                    "iid":    n.iid,
+                    "def_id": n.def_id,
+                    "x":      n.x,
+                    "y":      n.y,
+                    "w":      n.w,
+                    "h":      n.h,
+                    "params": dict(n.params),
+                }
+                for n in self.nodes.values()
+            ],
+            "connections": [
+                {
+                    "cid":      c.cid,
+                    "src_iid":  c.src_iid,
+                    "src_port": c.src_port,
+                    "dst_iid":  c.dst_iid,
+                    "dst_port": c.dst_port,
+                }
+                for c in self.connections.values()
+            ],
+        }
+
+    def load_from_dict(self, data: dict):
+        """从 ``to_dict()`` 的结果还原图状态（先清空当前图）。
+
+        未知 ``def_id`` 的节点会被静默跳过；指向它们的连线一并丢弃，
+        保证打开旧文件不会因为某个节点类型暂时下线而崩溃。
+        """
+        self.nodes.clear()
+        self.connections.clear()
+
+        for nd in data.get("nodes", []) or []:
+            def_id = nd.get("def_id")
+            if not def_id or REGISTRY.get(def_id) is None:
+                continue
+            inst = NodeInstance(
+                iid=nd.get("iid") or str(uuid.uuid4())[:8],
+                def_id=def_id,
+                x=float(nd.get("x", 100.0)),
+                y=float(nd.get("y", 100.0)),
+                w=float(nd.get("w", 0.0)),
+                h=float(nd.get("h", 0.0)),
+                params=dict(nd.get("params") or {}),
+            )
+            self.nodes[inst.iid] = inst
+
+        for cd in data.get("connections", []) or []:
+            src_iid = cd.get("src_iid")
+            dst_iid = cd.get("dst_iid")
+            if src_iid not in self.nodes or dst_iid not in self.nodes:
+                continue
+            conn = Connection(
+                cid=cd.get("cid") or str(uuid.uuid4())[:8],
+                src_iid=src_iid,
+                src_port=cd.get("src_port", ""),
+                dst_iid=dst_iid,
+                dst_port=cd.get("dst_port", ""),
+            )
+            self.connections[conn.cid] = conn
+
     # ── 拓扑排序 & 执行计划输出 ───────────────────────────────────────
 
     def topological_order(self) -> list[str] | None:

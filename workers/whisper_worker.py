@@ -88,9 +88,11 @@ class WhisperWorker(QThread):
                        "--model", model, "--device", device,
                        "--output_dir", output_dir]
 
+                # whisper CLI 的 --output_format 是 store 而非 append，
+                # 多次传只会保留最后一个；想要同时产出 txt/srt/vtt/json
+                # 必须借助内置的 "all" 关键字。
                 if output_format == 'all':
-                    cmd.extend(
-                        ["--output_format", "txt", "--output_format", "srt", "--output_format", "vtt"])
+                    cmd.extend(["--output_format", "all"])
                 else:
                     cmd.extend(["--output_format", output_format])
 

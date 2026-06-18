@@ -7,6 +7,8 @@ node_editor.py
 from node.node_canvas import NodeCanvas
 from node.node_graph import NodeGraph
 from node.node_registry import REGISTRY, CATEGORY_COLORS, PORT_COLORS, NodeDef
+from node.node_worker import GraphWorker
+from logger import info, warning, error as log_error
 from qfluentwidgets import (
     setTheme, Theme, setThemeColor,
     FluentWindow, NavigationItemPosition,
@@ -33,9 +35,15 @@ from PyQt6.QtCore import (
     QTimer, pyqtSignal
 )
 from PyQt6.QtWidgets import QFileDialog, QDialog, QDialogButtonBox, QVBoxLayout, QListWidget, QListWidgetItem
+import json
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 用户配置里记录"上次打开的 .node 文件"
+from utils.configer import get_field, set_field
+_LAST_FILE_KEY = "node_editor.last_file"
+_NODE_FILE_FILTER = "节点图 (*.node *.json);;所有文件 (*)"
 
 
 ACCENT = "#0078D4"
@@ -416,6 +424,34 @@ class PropertyPanel(QWidget):
             lay.addWidget(combo)
             return row
 
+        # ── 静态枚举（NodeDef.param_choices）：下拉框 ────────────────
+        node = self.graph.nodes.get(iid)
+        nd = node.definition if node else None
+        choices = nd.param_choices.get(key) if nd else None
+        if choices:
+            combo = ComboBox(row)
+            combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Fixed)
+            disp = [str(c) for c in choices]
+            combo.addItems(disp)
+            cur = str(val) if val is not None else ""
+            if cur in disp:
+                combo.setCurrentText(cur)
+            else:
+                # 当前值不在选项中：同步成首项
+                combo.setCurrentIndex(0)
+                self.graph.set_param(iid, key, choices[0])
+                self.param_changed.emit(iid, key, choices[0])
+
+            def _on_choice_changed(idx, k=key, _choices=choices):
+                value = _choices[idx]
+                self.graph.set_param(iid, k, value)
+                self.param_changed.emit(iid, k, value)
+            combo.currentIndexChanged.connect(_on_choice_changed)
+
+            lay.addWidget(combo)
+            return row
+
         # ── 文件 / 目录：LineEdit + 浏览按钮 ─────────────────────────
         is_file = key_low in _FILE_PARAM_KEYS
         is_dir = key_low in _DIR_PARAM_KEYS
@@ -487,9 +523,13 @@ class NodeEditorPage(QWidget):
 
         self.graph = NodeGraph()
         self._spawn_pos_offset = 0   # 自动错开新节点位置
+        self._runner: GraphWorker | None = None
+        # 当前关联文件路径；None = 新建未保存
+        self._current_file: str | None = None
 
         self._build_ui()
-        self._add_demo_nodes()
+        # 启动加载策略：用户配置里有"上次打开的文件"就读；读不到才回退到 demo
+        self._auto_load_on_start()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -523,9 +563,9 @@ class NodeEditorPage(QWidget):
         tb_lay.addWidget(hint)
         tb_lay.addStretch()
 
-        run_btn = PrimaryPushButton(FIF.PLAY, "执行计划", toolbar)
-        run_btn.clicked.connect(self._run_plan)
-        tb_lay.addWidget(run_btn)
+        self._run_btn = PrimaryPushButton(FIF.PLAY, "执行计划", toolbar)
+        self._run_btn.clicked.connect(self._on_run_btn_click)
+        tb_lay.addWidget(self._run_btn)
 
         fit_btn = PushButton(FIF.FULL_SCREEN, "适应视图", toolbar)
         fit_btn.clicked.connect(lambda: self._canvas.fit_view())
@@ -535,7 +575,28 @@ class NodeEditorPage(QWidget):
         clear_btn.clicked.connect(self._clear_graph)
         tb_lay.addWidget(clear_btn)
 
+        # ── 文件操作 ─────────────────────────────────────────────────
+        open_btn = PushButton(FIF.FOLDER, "打开", toolbar)
+        open_btn.setToolTip("打开 .node 文件 (Ctrl+O)")
+        open_btn.clicked.connect(self._open_file)
+        tb_lay.addWidget(open_btn)
+
+        save_btn = PushButton(FIF.SAVE, "保存", toolbar)
+        save_btn.setToolTip("保存当前节点图 (Ctrl+S)")
+        save_btn.clicked.connect(self._save_file)
+        tb_lay.addWidget(save_btn)
+
+        save_as_btn = PushButton(FIF.SAVE_AS, "另存为", toolbar)
+        save_as_btn.setToolTip("另存为 .node 文件 (Ctrl+Shift+S)")
+        save_as_btn.clicked.connect(self._save_file_as)
+        tb_lay.addWidget(save_as_btn)
+
         root.addWidget(toolbar)
+
+        # 文件操作快捷键（保留原有 Shift+A）
+        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self._open_file)
+        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_file)
+        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self._save_file_as)
 
         # ── 主体：画布 + 右侧属性面板 ────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -653,15 +714,123 @@ class NodeEditorPage(QWidget):
     def _on_graph_changed(self):
         self._canvas.refresh_all_previews()
 
-    def _run_plan(self):
-        self.graph.print_execution_plan()
-        InfoBar.success(
-            title="已输出执行计划",
-            content="请查看控制台",
+    def _on_run_btn_click(self):
+        """按钮在执行/终止两态间切换。"""
+        if self._runner is not None and self._runner.isRunning():
+            self._cancel_run()
+        else:
+            self._run_plan()
+
+    def _set_run_btn_running(self, running: bool):
+        if running:
+            self._run_btn.setIcon(FIF.CLOSE)
+            self._run_btn.setText("终止")
+        else:
+            self._run_btn.setIcon(FIF.PLAY)
+            self._run_btn.setText("执行计划")
+
+    def _cancel_run(self):
+        if self._runner is None or not self._runner.isRunning():
+            return
+        # 防止反复点击
+        self._run_btn.setEnabled(False)
+        self._run_btn.setText("终止中…")
+        self._runner.cancel()
+        InfoBar.warning(
+            title="正在终止",
+            content="已请求取消，等待当前节点收尾…",
             parent=self,
             position=InfoBarPosition.TOP_RIGHT,
-            duration=2500,
+            duration=2000,
         )
+
+    def _run_plan(self):
+        # 控制台打印一份计划（保留旧行为，便于排查）
+        self.graph.print_execution_plan()
+
+        # 启动 GraphWorker
+        self._runner = GraphWorker(self.graph, parent=self)
+        self._runner.output.connect(self._on_runner_output)
+        self._runner.progress.connect(self._on_runner_progress)
+        self._runner.finished.connect(self._on_runner_finished)
+        self._runner.error.connect(self._on_runner_error)
+        self._runner.start()
+
+        self._set_run_btn_running(True)
+        InfoBar.info(
+            title="开始执行",
+            content="节点图已提交后台执行，日志见控制台",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=2000,
+        )
+
+    # ── GraphWorker 信号回调 ──────────────────────────────────────────
+    @staticmethod
+    def _strip_html(text: str) -> str:
+        import re
+        return re.sub(r"<[^>]+>", "", text)
+
+    def _on_runner_output(self, line: str):
+        info(self._strip_html(line))
+
+    def _on_runner_progress(self, percent: int, status: str):
+        info(f"[{percent}%] {status}")
+
+    def _on_runner_finished(self, results: dict):
+        info(f"节点图执行结束，输出节点数: {len(results)}")
+        InfoBar.success(
+            title="执行完成",
+            content=f"共 {len(results)} 个节点产出结果",
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=3000,
+        )
+        # 把执行结果中的实际输出路径写回到下游 preview 节点的 params["path"]，
+        # 这样 NodeCanvas.resolve_preview_path 才能找到 demucs / whisper /
+        # realesrgan 等中间节点的产物。
+        for iid, node in self.graph.nodes.items():
+            if node.def_id != "preview":
+                continue
+            resolved = None
+            for conn in self.graph.connections.values():
+                if conn.dst_iid != iid:
+                    continue
+                src_outs = results.get(conn.src_iid, {})
+                val = src_outs.get(conn.src_port)
+                path = getattr(val, "path", None)
+                if path:
+                    resolved = path
+                    break
+            if resolved:
+                node.params["path"] = resolved
+        self._canvas.refresh_all_previews()
+        self._runner = None
+        self._run_btn.setEnabled(True)
+        self._set_run_btn_running(False)
+
+    def _on_runner_error(self, msg: str):
+        log_error(f"节点图执行失败: {msg}")
+        # 区分用户取消 vs 真正错误
+        if "取消" in msg:
+            InfoBar.warning(
+                title="已终止",
+                content=msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+            )
+        else:
+            InfoBar.error(
+                title="执行失败",
+                content=msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=4000,
+            )
+        self._runner = None
+        self._run_btn.setEnabled(True)
+        self._set_run_btn_running(False)
 
     def _clear_graph(self):
         self._canvas.clear_all_previews()
@@ -669,6 +838,125 @@ class NodeEditorPage(QWidget):
             self.graph.remove_node(iid)
         self._prop_panel.clear_selection()
         self._canvas.update()
+
+    # ── 文件 IO ──────────────────────────────────────────────────────
+
+    def _auto_load_on_start(self):
+        """启动时按用户配置里的 last_file 自动加载；失败则回退到 demo 节点。"""
+        last = get_field(_LAST_FILE_KEY)
+        if last and isinstance(last, str) and os.path.isfile(last):
+            try:
+                self._load_from_path(last)
+                return
+            except Exception as e:
+                warning(f"加载上次的节点文件失败: {e}")
+        # 没有上次记录或加载失败 —— 保留旧的 demo 行为兜底
+        self._add_demo_nodes()
+
+    def _load_from_path(self, path: str):
+        """从指定路径加载 .node 文件到当前图。"""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 清掉现有状态（含 canvas 预览），再加载
+        self._canvas.clear_all_previews()
+        self.graph.load_from_dict(data)
+        self._prop_panel.clear_selection()
+        self._canvas.update()
+        self._canvas.refresh_all_previews()
+        QTimer.singleShot(100, self._canvas.fit_view)
+
+        self._current_file = path
+        set_field(_LAST_FILE_KEY, path)
+        info(f"已加载节点文件: {path}")
+
+    def _open_file(self):
+        # 默认目录：当前文件所在目录 → 上次文件所在目录 → cwd
+        start_dir = ""
+        if self._current_file and os.path.isfile(self._current_file):
+            start_dir = os.path.dirname(self._current_file)
+        else:
+            last = get_field(_LAST_FILE_KEY)
+            if last and os.path.isfile(last):
+                start_dir = os.path.dirname(last)
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "打开节点文件", start_dir, _NODE_FILE_FILTER)
+        if not path:
+            return
+        try:
+            self._load_from_path(path)
+            InfoBar.success(
+                title="已打开",
+                content=os.path.basename(path),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2000,
+            )
+        except Exception as e:
+            log_error(f"打开节点文件失败: {e}")
+            InfoBar.error(
+                title="打开失败",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+            )
+
+    def _save_file(self):
+        # 没关联文件 → 走另存为
+        if not self._current_file:
+            self._save_file_as()
+            return
+        self._save_to_path(self._current_file)
+
+    def _save_file_as(self):
+        start_dir = ""
+        if self._current_file:
+            start_dir = self._current_file
+        else:
+            last = get_field(_LAST_FILE_KEY)
+            if last:
+                start_dir = os.path.dirname(last) if os.path.isfile(last) else ""
+            if not start_dir:
+                start_dir = "untitled.node"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "另存为", start_dir, _NODE_FILE_FILTER)
+        if not path:
+            return
+        # 用户没写扩展名时补 .node（保持 JSON 内容不变）
+        if not os.path.splitext(path)[1]:
+            path += ".node"
+        self._save_to_path(path)
+
+    def _save_to_path(self, path: str):
+        try:
+            data = self.graph.to_dict()
+            os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log_error(f"保存节点文件失败: {e}")
+            InfoBar.error(
+                title="保存失败",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3500,
+            )
+            return
+
+        self._current_file = path
+        set_field(_LAST_FILE_KEY, path)
+        info(f"节点文件已保存: {path}")
+        InfoBar.success(
+            title="已保存",
+            content=os.path.basename(path),
+            parent=self,
+            position=InfoBarPosition.TOP_RIGHT,
+            duration=2000,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
