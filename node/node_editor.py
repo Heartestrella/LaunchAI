@@ -15,17 +15,19 @@ from qfluentwidgets import (
     ElevatedCardWidget, CardWidget,
     TitleLabel, SubtitleLabel, BodyLabel, CaptionLabel, StrongBodyLabel,
     PrimaryPushButton, PushButton, TransparentPushButton, TransparentToolButton,
-    ToolButton, LineEdit as FLineEdit, ComboBox,
+    ToolButton, LineEdit as FLineEdit, PlainTextEdit, ComboBox,
+    SpinBox, DoubleSpinBox, CheckBox,
     ProgressBar, SmoothScrollArea,
     InfoBar, InfoBarPosition,
     FluentIcon as FIF,
     IconWidget, isDarkTheme,
+    TabBar, TabCloseButtonDisplayMode,
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QFrame, QSizePolicy, QScrollArea,
     QLineEdit, QSplitter, QTreeWidget, QTreeWidgetItem,
-    QDockWidget, QMainWindow, QAbstractItemView
+    QDockWidget, QMainWindow, QAbstractItemView, QStackedWidget,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QKeySequence, QShortcut, QIcon
@@ -47,11 +49,49 @@ _NODE_FILE_FILTER = "节点图 (*.node *.json);;所有文件 (*)"
 
 
 ACCENT = "#0078D4"
-_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input"}
-_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir"}
+_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
 _DEVICE_PARAM_KEYS = {"device", "gpu", "gpu_id"}
-_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input"}
-_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir"}
+_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
+# 多行文本参数 —— 渲染为 PlainTextEdit 而非单行 LineEdit
+# 适用于 prompt / 参考文本 / 目标文本 / 注释 等长内容
+_MULTILINE_TEXT_PARAM_KEYS = {"text", "ref_text", "target_text",
+                              "prompt", "note", "description"}
+
+# 已知数值参数的合理范围 (min, max, step) —— 与各子页 UI 保持一致
+# 落到这里的键名会渲染为 SpinBox / DoubleSpinBox 并应用对应范围
+# 没列出的数值参数仍按类型给通用兜底范围
+_NUMERIC_PARAM_RANGES = {
+    # GPT-SoVITS（与 subpage_gptsovits 高级参数卡一致）
+    "top_k":         (1, 100, 1),
+    "top_p":         (0.1, 1.0, 0.05),
+    "temperature":   (0.1, 2.0, 0.05),
+    "speed":         (0.5, 2.0, 0.05),
+    # Demucs
+    "shifts":        (1, 10, 1),
+    "overlap":       (0.0, 0.99, 0.05),
+    "segment":       (1, 7, 1),       # htdemucs 类 Transformer 最大 7.8s
+    # Real-ESRGAN
+    "scale":         (1, 8, 1),
+    "tile":          (0, 2048, 32),
+    # RVC
+    "transpose":     (-24, 24, 1),
+    "index_rate":    (0.0, 1.0, 0.05),
+    "filter_radius": (0, 7, 1),
+    "resample_sr":   (0, 48000, 1000),
+    "rms_mix_rate":  (0.0, 1.0, 0.05),
+    "protect":       (0.0, 0.5, 0.05),
+    # 图像
+    "width":         (1, 16384, 1),
+    "height":        (1, 16384, 1),
+    # 通用
+    # entry_index = -1 是 sovits_list_input 节点的"自动取首个可用"语义
+    "entry_index":   (-1, 9999, 1),
+    "fps":           (1, 120, 1),
+    "volume_a":      (0.0, 4.0, 0.1),
+    "volume_b":      (0.0, 4.0, 0.1),
+}
 # ══════════════════════════════════════════════════════════════════════
 #  Shift+A 节点选择弹出面板
 # ══════════════════════════════════════════════════════════════════════
@@ -327,6 +367,11 @@ class PropertyPanel(QWidget):
         self._set_cards_visible(False)
 
     # ── 公共方法 ──────────────────────────────────────────────────────
+    def set_graph(self, graph: NodeGraph):
+        """切换底层节点图（多 tab 文档场景）。"""
+        self.graph = graph
+        self.clear_selection()
+
     def show_node(self, iid: str):
         self._iid = iid
         node = self.graph.nodes.get(iid)
@@ -452,6 +497,85 @@ class PropertyPanel(QWidget):
             lay.addWidget(combo)
             return row
 
+        # ── 布尔 / 整数 / 浮点：CheckBox / SpinBox / DoubleSpinBox ───
+        # 注意 bool 是 int 子类 必须先判 bool
+        if isinstance(val, bool):
+            chk = CheckBox(row)
+            chk.setChecked(val)
+
+            def _on_bool_changed(state, k=key):
+                value = bool(state)
+                self.graph.set_param(iid, k, value)
+                self.param_changed.emit(iid, k, value)
+            chk.stateChanged.connect(_on_bool_changed)
+
+            lay.addWidget(chk)
+            return row
+
+        if isinstance(val, int):
+            rng = _NUMERIC_PARAM_RANGES.get(key_low)
+            vmin, vmax, step = rng if rng else (-99999, 99999, 1)
+            sb = SpinBox(row)
+            sb.setRange(int(vmin), int(vmax))
+            sb.setSingleStep(int(step))
+            sb.setValue(int(val))
+            sb.setSizePolicy(QSizePolicy.Policy.Expanding,
+                             QSizePolicy.Policy.Fixed)
+
+            def _on_int_changed(value, k=key):
+                v = int(value)
+                self.graph.set_param(iid, k, v)
+                self.param_changed.emit(iid, k, v)
+            sb.valueChanged.connect(_on_int_changed)
+
+            lay.addWidget(sb)
+            return row
+
+        if isinstance(val, float):
+            rng = _NUMERIC_PARAM_RANGES.get(key_low)
+            vmin, vmax, step = rng if rng else (-9999.0, 9999.0, 0.1)
+            # 根据步长推导小数位 0.05 → 2 位 0.1 → 1 位
+            if   step >= 1:    decimals = 0
+            elif step >= 0.1:  decimals = 1
+            elif step >= 0.01: decimals = 2
+            else:              decimals = 4
+
+            dsb = DoubleSpinBox(row)
+            dsb.setRange(float(vmin), float(vmax))
+            dsb.setSingleStep(float(step))
+            dsb.setDecimals(decimals)
+            dsb.setValue(float(val))
+            dsb.setSizePolicy(QSizePolicy.Policy.Expanding,
+                              QSizePolicy.Policy.Fixed)
+
+            def _on_float_changed(value, k=key):
+                v = float(value)
+                self.graph.set_param(iid, k, v)
+                self.param_changed.emit(iid, k, v)
+            dsb.valueChanged.connect(_on_float_changed)
+
+            lay.addWidget(dsb)
+            return row
+
+        # ── 多行文本：PlainTextEdit ──────────────────────────────────
+        if key_low in _MULTILINE_TEXT_PARAM_KEYS:
+            tedit = PlainTextEdit(row)
+            tedit.setPlainText(str(val) if val is not None else "")
+            tedit.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                QSizePolicy.Policy.Fixed)
+            # 4 行高度起步 用户拖窗口或长文本时滚动条接管
+            fm = tedit.fontMetrics()
+            tedit.setFixedHeight(fm.lineSpacing() * 4 + 18)
+
+            def _on_text_changed(_te=tedit, k=key):
+                value = _te.toPlainText()
+                self.graph.set_param(iid, k, value)
+                self.param_changed.emit(iid, k, value)
+            tedit.textChanged.connect(_on_text_changed)
+
+            lay.addWidget(tedit)
+            return row
+
         # ── 文件 / 目录：LineEdit + 浏览按钮 ─────────────────────────
         is_file = key_low in _FILE_PARAM_KEYS
         is_dir = key_low in _DIR_PARAM_KEYS
@@ -509,6 +633,61 @@ class PropertyPanel(QWidget):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  Tab 文档容器
+# ══════════════════════════════════════════════════════════════════════
+
+
+class _TabRenameEdit(FLineEdit):
+    """双击 tab 标题时叠加上去的临时内联编辑器。
+
+    - Enter / 失焦 → 提交新名
+    - Esc          → 取消
+    - emit accepted(text) 之后自动 deleteLater
+    """
+
+    accepted = pyqtSignal(str)   # 提交的新名,空字符串视为取消
+
+    def __init__(self, initial: str, parent=None):
+        super().__init__(parent)
+        self.setText(initial)
+        self.selectAll()
+        self._done = False
+        self.editingFinished.connect(self._finish_accept)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self._finish("")
+            return
+        super().keyPressEvent(e)
+
+    def _finish_accept(self):
+        self._finish(self.text().strip())
+
+    def _finish(self, text: str):
+        if self._done:
+            return
+        self._done = True
+        self.accepted.emit(text)
+        self.deleteLater()
+
+
+class _Doc:
+    """一个 tab 对应一份独立的节点图会话。"""
+
+    __slots__ = ("route_key", "graph", "canvas",
+                 "current_file", "runner", "title")
+
+    def __init__(self, route_key: str, graph: NodeGraph, canvas,
+                 title: str, current_file: str | None = None):
+        self.route_key = route_key
+        self.graph = graph
+        self.canvas = canvas
+        self.current_file = current_file
+        self.runner: GraphWorker | None = None
+        self.title = title
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  主编辑器页面
 # ══════════════════════════════════════════════════════════════════════
 
@@ -521,15 +700,56 @@ class NodeEditorPage(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
 
-        self.graph = NodeGraph()
         self._spawn_pos_offset = 0   # 自动错开新节点位置
-        self._runner: GraphWorker | None = None
-        # 当前关联文件路径；None = 新建未保存
-        self._current_file: str | None = None
+        self._docs: list[_Doc] = []
+        self._doc_seq = 0            # 用于生成唯一 routeKey + "未命名 N" 标题
+        # 切 tab 时短暂屏蔽 currentChanged 反复触发
+        self._switching_tab = False
 
         self._build_ui()
         # 启动加载策略：用户配置里有"上次打开的文件"就读；读不到才回退到 demo
         self._auto_load_on_start()
+
+    # ── 活动文档代理 ─────────────────────────────────────────────────
+    @property
+    def _active(self) -> _Doc | None:
+        idx = self._tabbar.currentIndex() if hasattr(self, "_tabbar") else -1
+        if 0 <= idx < len(self._docs):
+            return self._docs[idx]
+        return None
+
+    @property
+    def graph(self) -> NodeGraph:
+        """活动文档的 graph（无文档时返回一个空图,防止外部空引用）。"""
+        d = self._active
+        return d.graph if d else NodeGraph()
+
+    @property
+    def _canvas(self):
+        d = self._active
+        return d.canvas if d else None
+
+    @property
+    def _runner(self) -> GraphWorker | None:
+        d = self._active
+        return d.runner if d else None
+
+    @_runner.setter
+    def _runner(self, value: GraphWorker | None):
+        d = self._active
+        if d:
+            d.runner = value
+
+    @property
+    def _current_file(self) -> str | None:
+        d = self._active
+        return d.current_file if d else None
+
+    @_current_file.setter
+    def _current_file(self, value: str | None):
+        d = self._active
+        if d:
+            d.current_file = value
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -597,23 +817,42 @@ class NodeEditorPage(QWidget):
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self._open_file)
         QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_file)
         QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self._save_file_as)
+        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self._new_tab)
+        QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(
+            lambda: self._close_tab(self._tabbar.currentIndex())
+        )
 
-        # ── 主体：画布 + 右侧属性面板 ────────────────────────────────
+        # ── 文档 TabBar ─────────────────────────────────────────────
+        self._tabbar = TabBar(self)
+        self._tabbar.setMovable(True)
+        self._tabbar.setScrollable(True)
+        self._tabbar.setTabMaximumWidth(220)
+        self._tabbar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ALWAYS)
+        self._tabbar.setStyleSheet(
+            "TabBar{background:#1e1e1e;"
+            "border-bottom:1px solid rgba(255,255,255,0.08);}"
+        )
+        self._tabbar.tabAddRequested.connect(self._new_tab)
+        self._tabbar.tabCloseRequested.connect(self._close_tab)
+        self._tabbar.currentChanged.connect(self._on_tab_changed)
+        self._tabbar.tabBarDoubleClicked.connect(self._begin_rename_tab)
+        root.addWidget(self._tabbar)
+
+        # ── 主体：画布栈 + 右侧属性面板 ──────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
         splitter.setHandleWidth(1)
         splitter.setStyleSheet(
             "QSplitter::handle{background:rgba(255,255,255,0.08);}")
 
-        # 画布
-        self._canvas = NodeCanvas(self.graph, splitter)
-        self._canvas.node_selected.connect(self._on_node_selected)
-        self._canvas.node_deselected.connect(self._on_node_deselected)
-        self._canvas.graph_changed.connect(self._on_graph_changed)
-        splitter.addWidget(self._canvas)
+        # 画布栈：每个 tab 一个 NodeCanvas 实例
+        self._canvas_stack = QStackedWidget(splitter)
+        splitter.addWidget(self._canvas_stack)
 
         # 属性面板
+        # 用 setMinimumWidth 而非 setFixedWidth 这样 QSplitter 的拖拽手柄能生效
+        # 用户拖宽以适配像 gptsovits 这种 5 端口 + 多参数的复杂节点
         prop_container = QFrame(splitter)
-        prop_container.setFixedWidth(260)
+        prop_container.setMinimumWidth(300)
         prop_container.setStyleSheet(
             "background:#1e1e1e;border-left:1px solid rgba(255,255,255,0.08);")
         pc_lay = QVBoxLayout(prop_container)
@@ -628,14 +867,18 @@ class NodeEditorPage(QWidget):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         pc_lay.addWidget(prop_title)
 
+        # PropertyPanel 与活动 doc 共享：tab 切换时通过 set_graph 换底层图
         self._prop_panel = PropertyPanel(
-            self.graph, self.cuda_drivers, prop_container)
+            NodeGraph(), self.cuda_drivers, prop_container)
         self._prop_panel.setStyleSheet("color:#e0e0e0;")
         self._prop_panel.param_changed.connect(self._on_param_changed)
         pc_lay.addWidget(self._prop_panel)
 
         splitter.addWidget(prop_container)
-        splitter.setSizes([1200, 260])
+        # 拖拽时让画布优先扩张 属性面板保持当前宽度
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setSizes([1200, 360])
         root.addWidget(splitter, 1)
 
         # ── Shift+A 节点面板 ──────────────────────────────────────────
@@ -645,6 +888,129 @@ class NodeEditorPage(QWidget):
         # 快捷键
         sc = QShortcut(QKeySequence("Shift+A"), self)
         sc.activated.connect(self._open_picker)
+
+    # ── Tab 管理 ──────────────────────────────────────────────────────
+    def _create_doc(self, title: str, current_file: str | None = None) -> _Doc:
+        """构造一个新的 _Doc(graph + canvas),注册到 TabBar 与 QStackedWidget。"""
+        self._doc_seq += 1
+        route_key = f"doc_{self._doc_seq}"
+
+        graph = NodeGraph()
+        canvas = NodeCanvas(graph, self._canvas_stack)
+        canvas.node_selected.connect(self._on_node_selected)
+        canvas.node_deselected.connect(self._on_node_deselected)
+        canvas.graph_changed.connect(self._on_graph_changed)
+        self._canvas_stack.addWidget(canvas)
+
+        doc = _Doc(route_key, graph, canvas, title, current_file)
+        self._docs.append(doc)
+        self._tabbar.addTab(route_key, title, FIF.DOCUMENT)
+        return doc
+
+    def _new_tab(self):
+        """TabBar 的 + 按钮 / Ctrl+T 触发：新建一份空白节点图,自动切到新页。"""
+        doc = self._create_doc(self._next_untitled_name())
+        idx = self._docs.index(doc)
+        self._tabbar.setCurrentIndex(idx)
+        # TabBar.setCurrentIndex 不发 currentChanged,得手动切画布栈
+        self._on_tab_changed(idx)
+
+    def _next_untitled_name(self) -> str:
+        used = {d.title for d in self._docs}
+        i = 1
+        while f"未命名 {i}" in used:
+            i += 1
+        return f"未命名 {i}"
+
+    def _close_tab(self, index: int):
+        if not (0 <= index < len(self._docs)):
+            return
+        doc = self._docs[index]
+
+        # 若 doc 仍在执行,先取消
+        if doc.runner is not None and doc.runner.isRunning():
+            try:
+                doc.runner.cancel()
+            except Exception:
+                pass
+
+        self._canvas_stack.removeWidget(doc.canvas)
+        doc.canvas.deleteLater()
+        self._docs.pop(index)
+        self._tabbar.removeTab(index)
+
+        # 至少保留一个 tab
+        if not self._docs:
+            self._new_tab()
+        else:
+            # TabBar.removeTab 会自动调整 currentIndex,这里同步一下显示
+            self._on_tab_changed(self._tabbar.currentIndex())
+
+    def _on_tab_changed(self, index: int):
+        if self._switching_tab:
+            return
+        if not (0 <= index < len(self._docs)):
+            return
+        doc = self._docs[index]
+        self._canvas_stack.setCurrentWidget(doc.canvas)
+        self._prop_panel.set_graph(doc.graph)
+        self._refresh_run_button()
+
+    def _set_doc_title(self, doc: _Doc, title: str):
+        doc.title = title
+        idx = self._docs.index(doc)
+        self._tabbar.tabItem(idx).setText(title)
+
+    def _begin_rename_tab(self, index: int):
+        """双击 tab 触发的内联重命名。
+
+        Parent 必须在 TabBar 之外（这里用 NodeEditorPage 自身）—— 不然
+        TabItem.mouseDoubleClickEvent 里的合成 mousePress 会触发
+        TabItem.setSelected -> raise_()，把刚 raise 上去的编辑器再次压回底部，
+        造成"打字时看不到光标也看不到字"的现象。
+        """
+        if not (0 <= index < len(self._docs)):
+            return
+        # 用 QTimer 推到事件循环下一帧，避开双击事件链尾巴上的合成 press 抢焦点
+        QTimer.singleShot(0, lambda i=index: self._spawn_rename_editor(i))
+
+    def _spawn_rename_editor(self, index: int):
+        if not (0 <= index < len(self._docs)):
+            return
+        doc = self._docs[index]
+        item = self._tabbar.tabItem(index)
+
+        edit = _TabRenameEdit(doc.title, self)
+        # 把 TabItem 的左上角换算成 NodeEditorPage 坐标
+        top_left = item.mapTo(self, QPoint(0, 0))
+        rect = item.geometry()
+        # 留出 4px 边距,右侧再让出 32px 给关闭按钮
+        edit.setGeometry(
+            top_left.x() + 4, top_left.y() + 4,
+            max(60, rect.width() - 36), rect.height() - 8,
+        )
+        edit.setStyleSheet(
+            "QLineEdit{background:#2d2d2d;color:#e0e0e0;"
+            "border:1px solid #0078D4;border-radius:4px;"
+            "padding:2px 6px;font-size:12px;}"
+        )
+        edit.accepted.connect(
+            lambda new_title, _d=doc: self._commit_rename(_d, new_title))
+        edit.show()
+        edit.raise_()
+        edit.setFocus()
+
+    def _commit_rename(self, doc: _Doc, new_title: str):
+        new_title = new_title.strip()
+        # 空 / 未变 / doc 已关闭 都视为无操作
+        if not new_title or new_title == doc.title or doc not in self._docs:
+            return
+        self._set_doc_title(doc, new_title)
+
+    def _refresh_run_button(self):
+        running = self._runner is not None and self._runner.isRunning()
+        self._run_btn.setEnabled(True)
+        self._set_run_btn_running(running)
 
     # ── Demo 节点 ──────────────────────────────────────────────────────
 
@@ -730,12 +1096,13 @@ class NodeEditorPage(QWidget):
             self._run_btn.setText("执行计划")
 
     def _cancel_run(self):
-        if self._runner is None or not self._runner.isRunning():
+        doc = self._active
+        if doc is None or doc.runner is None or not doc.runner.isRunning():
             return
         # 防止反复点击
         self._run_btn.setEnabled(False)
         self._run_btn.setText("终止中…")
-        self._runner.cancel()
+        doc.runner.cancel()
         InfoBar.warning(
             title="正在终止",
             content="已请求取消，等待当前节点收尾…",
@@ -745,21 +1112,27 @@ class NodeEditorPage(QWidget):
         )
 
     def _run_plan(self):
+        doc = self._active
+        if doc is None:
+            return
         # 控制台打印一份计划（保留旧行为，便于排查）
-        self.graph.print_execution_plan()
+        doc.graph.print_execution_plan()
 
-        # 启动 GraphWorker
-        self._runner = GraphWorker(self.graph, parent=self)
-        self._runner.output.connect(self._on_runner_output)
-        self._runner.progress.connect(self._on_runner_progress)
-        self._runner.finished.connect(self._on_runner_finished)
-        self._runner.error.connect(self._on_runner_error)
-        self._runner.start()
+        # 启动 GraphWorker —— 把 doc 绑进回调,切 tab 不影响命中目标
+        runner = GraphWorker(doc.graph, parent=self)
+        runner.output.connect(self._on_runner_output)
+        runner.progress.connect(self._on_runner_progress)
+        runner.finished.connect(
+            lambda r, _d=doc: self._on_runner_finished(_d, r))
+        runner.error.connect(
+            lambda m, _d=doc: self._on_runner_error(_d, m))
+        runner.start()
+        doc.runner = runner
 
         self._set_run_btn_running(True)
         InfoBar.info(
             title="开始执行",
-            content="节点图已提交后台执行，日志见控制台",
+            content=f"{doc.title}: 节点图已提交后台执行，日志见控制台",
             parent=self,
             position=InfoBarPosition.TOP_RIGHT,
             duration=2000,
@@ -777,11 +1150,16 @@ class NodeEditorPage(QWidget):
     def _on_runner_progress(self, percent: int, status: str):
         info(f"[{percent}%] {status}")
 
-    def _on_runner_finished(self, results: dict):
-        info(f"节点图执行结束，输出节点数: {len(results)}")
+    def _on_runner_finished(self, doc: "_Doc", results: dict):
+        doc.runner = None
+        # tab 已被关闭：canvas 已 deleteLater,只记日志,不再触碰 UI
+        if doc not in self._docs:
+            info(f"节点图执行结束（{doc.title}），但 tab 已关闭,跳过 UI 更新")
+            return
+        info(f"节点图执行结束（{doc.title}），输出节点数: {len(results)}")
         InfoBar.success(
             title="执行完成",
-            content=f"共 {len(results)} 个节点产出结果",
+            content=f"{doc.title}: 共 {len(results)} 个节点产出结果",
             parent=self,
             position=InfoBarPosition.TOP_RIGHT,
             duration=3000,
@@ -789,11 +1167,11 @@ class NodeEditorPage(QWidget):
         # 把执行结果中的实际输出路径写回到下游 preview 节点的 params["path"]，
         # 这样 NodeCanvas.resolve_preview_path 才能找到 demucs / whisper /
         # realesrgan 等中间节点的产物。
-        for iid, node in self.graph.nodes.items():
+        for iid, node in doc.graph.nodes.items():
             if node.def_id != "preview":
                 continue
             resolved = None
-            for conn in self.graph.connections.values():
+            for conn in doc.graph.connections.values():
                 if conn.dst_iid != iid:
                     continue
                 src_outs = results.get(conn.src_iid, {})
@@ -804,18 +1182,22 @@ class NodeEditorPage(QWidget):
                     break
             if resolved:
                 node.params["path"] = resolved
-        self._canvas.refresh_all_previews()
-        self._runner = None
-        self._run_btn.setEnabled(True)
-        self._set_run_btn_running(False)
+        doc.canvas.refresh_all_previews()
+        if doc is self._active:
+            self._run_btn.setEnabled(True)
+            self._set_run_btn_running(False)
 
-    def _on_runner_error(self, msg: str):
-        log_error(f"节点图执行失败: {msg}")
+    def _on_runner_error(self, doc: "_Doc", msg: str):
+        doc.runner = None
+        if doc not in self._docs:
+            log_error(f"节点图执行失败（{doc.title}，tab 已关闭）: {msg}")
+            return
+        log_error(f"节点图执行失败（{doc.title}）: {msg}")
         # 区分用户取消 vs 真正错误
         if "取消" in msg:
             InfoBar.warning(
                 title="已终止",
-                content=msg,
+                content=f"{doc.title}: {msg}",
                 parent=self,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=2500,
@@ -823,14 +1205,14 @@ class NodeEditorPage(QWidget):
         else:
             InfoBar.error(
                 title="执行失败",
-                content=msg,
+                content=f"{doc.title}: {msg}",
                 parent=self,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=4000,
             )
-        self._runner = None
-        self._run_btn.setEnabled(True)
-        self._set_run_btn_running(False)
+        if doc is self._active:
+            self._run_btn.setEnabled(True)
+            self._set_run_btn_running(False)
 
     def _clear_graph(self):
         self._canvas.clear_all_previews()
@@ -842,7 +1224,12 @@ class NodeEditorPage(QWidget):
     # ── 文件 IO ──────────────────────────────────────────────────────
 
     def _auto_load_on_start(self):
-        """启动时按用户配置里的 last_file 自动加载；失败则回退到 demo 节点。"""
+        """启动时先建一个空白 tab,再尝试按 last_file 加载；失败回退到 demo 节点。"""
+        # 始终至少有一个 tab
+        self._create_doc(self._next_untitled_name())
+        self._tabbar.setCurrentIndex(0)
+        self._on_tab_changed(0)
+
         last = get_field(_LAST_FILE_KEY)
         if last and isinstance(last, str) and os.path.isfile(last):
             try:
@@ -854,19 +1241,26 @@ class NodeEditorPage(QWidget):
         self._add_demo_nodes()
 
     def _load_from_path(self, path: str):
-        """从指定路径加载 .node 文件到当前图。"""
+        """加载 .node 文件。若活动 doc 是空白未保存,就地加载；否则新开 tab。"""
+        doc = self._active
+        if doc is None or len(doc.graph.nodes) > 0 or doc.current_file is not None:
+            doc = self._create_doc(os.path.basename(path), path)
+            self._tabbar.setCurrentIndex(self._docs.index(doc))
+            self._on_tab_changed(self._docs.index(doc))
+
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         # 清掉现有状态（含 canvas 预览），再加载
-        self._canvas.clear_all_previews()
-        self.graph.load_from_dict(data)
-        self._prop_panel.clear_selection()
-        self._canvas.update()
-        self._canvas.refresh_all_previews()
-        QTimer.singleShot(100, self._canvas.fit_view)
+        doc.canvas.clear_all_previews()
+        doc.graph.load_from_dict(data)
+        self._prop_panel.set_graph(doc.graph)
+        doc.canvas.update()
+        doc.canvas.refresh_all_previews()
+        QTimer.singleShot(100, doc.canvas.fit_view)
 
-        self._current_file = path
+        doc.current_file = path
+        self._set_doc_title(doc, os.path.basename(path))
         set_field(_LAST_FILE_KEY, path)
         info(f"已加载节点文件: {path}")
 
@@ -947,7 +1341,10 @@ class NodeEditorPage(QWidget):
             )
             return
 
-        self._current_file = path
+        doc = self._active
+        if doc:
+            doc.current_file = path
+            self._set_doc_title(doc, os.path.basename(path))
         set_field(_LAST_FILE_KEY, path)
         info(f"节点文件已保存: {path}")
         InfoBar.success(

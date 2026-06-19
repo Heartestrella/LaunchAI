@@ -211,8 +211,14 @@ class NodeGraph:
 
         for nd in data.get("nodes", []) or []:
             def_id = nd.get("def_id")
-            if not def_id or REGISTRY.get(def_id) is None:
+            node_def = REGISTRY.get(def_id) if def_id else None
+            if node_def is None:
                 continue
+            # 合并 NodeDef 默认 params 与文件里保存的 params
+            # 保存的值优先 但 NodeDef 新增的键也会自动出现在旧文件里
+            # 否则属性面板按 node.params.items() 渲染 旧文件看不到新字段
+            merged_params = dict(node_def.params)
+            merged_params.update(nd.get("params") or {})
             inst = NodeInstance(
                 iid=nd.get("iid") or str(uuid.uuid4())[:8],
                 def_id=def_id,
@@ -220,7 +226,7 @@ class NodeGraph:
                 y=float(nd.get("y", 100.0)),
                 w=float(nd.get("w", 0.0)),
                 h=float(nd.get("h", 0.0)),
-                params=dict(nd.get("params") or {}),
+                params=merged_params,
             )
             self.nodes[inst.iid] = inst
 

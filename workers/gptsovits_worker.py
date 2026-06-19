@@ -38,7 +38,10 @@ class GPTSoVITSInferWorker(QThread):
             params: 参数字典，包含:
                 - gpt_model:        GPT 权重 .ckpt 路径
                 - sovits_model:     SoVITS 权重 .pth 路径
-                - ref_audio:        参考音频 wav 路径(3~10s)
+                - ref_audio:        主参考音频 wav 路径(3~10s)
+                - aux_ref_audios:   可选 list[str]，辅助参考音频路径列表，
+                                    透传给 inference_webui.get_tts_wav 的 inp_refs
+                                    做音色融合 (v3/v4 模型会被静默忽略)
                 - ref_text:         参考音频文本
                 - ref_language:     参考语种 (中文/英文/日文/粤语/韩文/中英混合/日英混合/粤英混合/韩英混合/多语种混合/多语种混合(粤语))
                 - target_text:      目标文本
@@ -58,6 +61,7 @@ class GPTSoVITSInferWorker(QThread):
             gpt_model = self.params.get("gpt_model", "")
             sovits_model = self.params.get("sovits_model", "")
             ref_audio = self.params.get("ref_audio", "")
+            aux_ref_audios = list(self.params.get("aux_ref_audios", []) or [])
             ref_text = self.params.get("ref_text", "")
             target_text = self.params.get("target_text", "")
             output_path = self.params.get("output", "")
@@ -67,6 +71,10 @@ class GPTSoVITSInferWorker(QThread):
                                 ("参考音频", ref_audio)):
                 if not path or not os.path.exists(path):
                     self.error.emit(f"{label}不存在: {path}")
+                    return
+            for path in aux_ref_audios:
+                if not path or not os.path.exists(path):
+                    self.error.emit(f"辅助参考音频不存在: {path}")
                     return
             if not ref_text.strip():
                 self.error.emit("参考文本为空")
@@ -93,6 +101,8 @@ class GPTSoVITSInferWorker(QThread):
                    "--temperature",     str(float(self.params.get("temperature", 1.0))),
                    "--speed",           str(float(self.params.get("speed", 1.0))),
                    "--device",          self.params.get("device", "cuda:0")]
+            for aux in aux_ref_audios:
+                cmd += ["--aux-ref-audio", aux]
 
             self.progress.emit(0, "准备启动 GPT-SoVITS...")
             self.output.emit(_html(
@@ -101,6 +111,10 @@ class GPTSoVITSInferWorker(QThread):
                 f"SoVITS 模型: {Path(sovits_model).name}", "#888888"))
             self.output.emit(_html(
                 f"参考音频: {Path(ref_audio).name}", "#888888"))
+            if aux_ref_audios:
+                self.output.emit(_html(
+                    f"辅助参考音频: {len(aux_ref_audios)} 个（音色融合）",
+                    "#888888"))
             self.output.emit(_html(
                 f"目标语种: {self.params.get('target_language', '中文')} · "
                 f"切分: {self.params.get('how_to_cut', '不切')}", "#888888"))

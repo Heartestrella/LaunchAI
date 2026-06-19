@@ -150,13 +150,23 @@ class RealESRGANWorker(QThread):
             out_path = output_dir
 
         # ── 构建命令行 ────────────────────────────────────────────────
+        # realesrgan-ncnn-vulkan 会把 -m 当作相对 exe 目录的路径，
+        # 内部用 "<exe_dir>\\<m_arg>\\<model>.param" 拼接。传绝对路径会得到
+        # "<exe_dir>\\C:\\...\\models\\xxx.param" 这种双前缀失败路径。
+        # 这里把 model_dir 转成相对 exe 目录的路径再传。
+        try:
+            model_dir_arg = os.path.relpath(model_dir, os.path.dirname(exe_path))
+        except ValueError:
+            # 跨盘符无法 relpath —— 退回绝对路径，让 exe 自己抱怨
+            model_dir_arg = model_dir
+
         cmd = [exe_path,
                "-i", input_path,
                "-o", out_path,
                "-s", str(scale),
                "-t", str(tile),
                "-n", model_name,
-               "-m", model_dir,
+               "-m", model_dir_arg,
                "-j", threads]
 
         # gpu_id 说明:

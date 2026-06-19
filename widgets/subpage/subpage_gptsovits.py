@@ -86,10 +86,16 @@ def parse_sovits_list_file(list_path: str) -> list[dict]:
 
 
 class ListEntryPickerDialog(QDialog):
-    """从 .list 文件多条参考音频中选一条。
+    """从 .list 文件多条参考音频中选若干条做音色融合。
 
-    存在的条目正常显示并可选；找不到音频文件的条目灰显且不可选，
-    用户能直观看到"有多少行因为音频缺失而不可用"。
+    多选：Ctrl/Shift 多选或点「全选可用」按钮；首条作主参考（决定回填的
+    参考文本/语种），其余作为辅助参考喂给 GPT-SoVITS 的 inp_refs。
+    存在的条目正常显示并可选；找不到音频文件的条目灰显且不可选。
+
+    左下角"重新选音频目录"按钮：
+        .list 跨机器使用时音频绝对路径通常全部失效。
+        点击后让用户选本地音频根目录，按 basename 重新匹配。
+        匹配逻辑见 utils.sovits_list.remap_entries_audio_root。
     """
 
     def __init__(self, entries: list[dict], parent=None):
@@ -97,32 +103,82 @@ class ListEntryPickerDialog(QDialog):
         self.setWindowTitle("选择参考音频条目")
         self.resize(640, 460)
 
-        self._entries = entries
-        self._selected: dict | None = None
-
-        total   = len(entries)
-        missing = sum(1 for e in entries if not e.get("exists", True))
-        usable  = total - missing
+        # 拷贝一份 —— remap 时会替换 self._entries，不污染调用方传入的 list
+        self._entries = list(entries)
+        self._selected: list[dict] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
+        # 摘要 / 列表 做成成员变量，remap 后 _rebuild_list 直接更新
+        self._summary_lbl = StrongBodyLabel("", self)
+        layout.addWidget(self._summary_lbl)
+
+        self._hint_lbl = CaptionLabel(
+            "按住 Ctrl/Shift 多选；首条作主参考，其余作辅助参考做音色融合", self)
+        self._hint_lbl.setStyleSheet("color: #8a8a8a;")
+        layout.addWidget(self._hint_lbl)
+
+        self._list = QListWidget(self)
+        self._list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.setAlternatingRowColors(True)
+        self._list.itemDoubleClicked.connect(self._on_accept)
+        layout.addWidget(self._list, 1)
+
+        # 按钮区：左侧"重新选音频目录" + "全选可用" 右侧 OK/Cancel
+        # QDialogButtonBox 用 ResetRole 把自定义按钮放到左边，跨平台行为一致
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self._remap_btn = PushButton("重新选音频目录", self)
+        self._remap_btn.setToolTip(
+            ".list 中的音频路径若全部失效（跨机器场景）\n"
+            "选择本地音频根目录，按文件名重新匹配")
+        buttons.addButton(
+            self._remap_btn,
+            QDialogButtonBox.ButtonRole.ResetRole,
+        )
+        self._select_all_btn = PushButton("全选可用", self)
+        self._select_all_btn.setToolTip("一次性选中所有音频存在的条目")
+        buttons.addButton(
+            self._select_all_btn,
+            QDialogButtonBox.ButtonRole.ResetRole,
+        )
+        self._remap_btn.clicked.connect(self._on_remap_clicked)
+        self._select_all_btn.clicked.connect(self._on_select_all_clicked)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # 首次渲染
+        self._rebuild_list()
+
+    def _rebuild_list(self):
+        """按当前 self._entries 重建摘要 + 列表。remap 后也走这里，
+        保证渲染逻辑只有一份。
+        """
+        self._list.clear()
+
+        total   = len(self._entries)
+        missing = sum(1 for e in self._entries if not e.get("exists", True))
+        usable  = total - missing
+
         summary = f".list 共 {total} 条，可用 {usable} 条"
         if missing:
             summary += f"，缺失 {missing} 条（灰色不可选）"
-        layout.addWidget(StrongBodyLabel(summary, self))
-
-        self._list = QListWidget(self)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._list.setAlternatingRowColors(True)
+        self._summary_lbl.setText(summary)
 
         first_usable = -1
-        for i, e in enumerate(entries):
+        for i, e in enumerate(self._entries):
             text_preview = e["text"]
             if len(text_preview) > 60:
                 text_preview = text_preview[:60] + "…"
-            label = f"[{e['speaker'] or '?'} · {e['lang'] or '?'}]  {text_preview}"
+            label = (f"[{e['speaker'] or '?'} · {e['lang'] or '?'}]  "
+                     f"{text_preview}")
             if not e.get("exists", True):
                 label = "⚠ 缺失  " + label
             item = QListWidgetItem(label)
@@ -138,32 +194,64 @@ class ListEntryPickerDialog(QDialog):
             self._list.addItem(item)
         if first_usable >= 0:
             self._list.setCurrentRow(first_usable)
-        self._list.itemDoubleClicked.connect(self._on_accept)
-        layout.addWidget(self._list, 1)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel,
+    def _on_remap_clicked(self):
+        """让用户选音频根目录，按 basename 重新匹配后刷新列表。"""
+        audio_root = QFileDialog.getExistingDirectory(
+            self, "选择音频根目录（按文件名重新匹配）", "")
+        if not audio_root:
+            return
+        # 延迟 import：避免 subpage 顶层多一条依赖
+        from utils.sovits_list import remap_entries_audio_root
+        prev_usable = sum(1 for e in self._entries if e.get("exists"))
+        new_entries = remap_entries_audio_root(self._entries, audio_root)
+        new_usable = sum(1 for e in new_entries if e.get("exists"))
+        self._entries = new_entries
+        self._rebuild_list()
+        InfoBar.success(
+            "已重新匹配",
+            f"按 {audio_root} 重匹配：可用 {prev_usable} → {new_usable}",
             parent=self,
         )
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+
+    def _on_select_all_clicked(self):
+        """选中所有 exists=True 的条目；灰条目本就 ItemIsSelectable 已关，不会被选上。"""
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.flags() & Qt.ItemFlag.ItemIsSelectable:
+                item.setSelected(True)
 
     def _on_accept(self, *_):
-        row = self._list.currentRow()
-        if 0 <= row < len(self._entries):
-            entry = self._entries[row]
-            # 双保险：双击灰条目时 currentRow 仍可能落上，这里再过滤一次
-            if entry.get("exists", True):
-                self._selected = entry
-                self.accept()
-                return
+        # 双击会带入 itemDoubleClicked 信号的 QListWidgetItem 实参；
+        # 双击灰条目时 selectedItems() 仍可能为空，单独走 currentItem() 兜底
+        picked: list[dict] = []
+        seen_rows: set[int] = set()
+        for item in self._list.selectedItems():
+            row = self._list.row(item)
+            if row in seen_rows:
+                continue
+            seen_rows.add(row)
+            if 0 <= row < len(self._entries):
+                entry = self._entries[row]
+                if entry.get("exists", True):
+                    picked.append(entry)
+        if not picked:
+            # 例如双击灰条目：fallback 到 currentRow
+            row = self._list.currentRow()
+            if 0 <= row < len(self._entries):
+                entry = self._entries[row]
+                if entry.get("exists", True):
+                    picked.append(entry)
+        if picked:
+            self._selected = picked
+            self.accept()
+            return
         # 没有有效选择就不关闭，让用户重新选
         self.reject()
 
     @property
-    def selected(self) -> dict | None:
+    def selected(self) -> list[dict]:
+        """返回用户选中的所有有效条目；首条作主参考。空列表代表未选/全无效。"""
         return self._selected
 
 from workers.gptsovits_worker import GPTSoVITSInferWorker
@@ -239,7 +327,9 @@ class TTSInferTab(QWidget):
         self.device_options = device_options or {}
         self._gpt_path = ""
         self._sovits_path = ""
-        self._ref_audio_path = ""
+        # 多参考音频：约定第一项是主参考（喂 ref_wav_path + 决定文本/语种回填），
+        # 其余作为 inp_refs 喂给 GPT-SoVITS 做音色融合（v3/v4 模型会被静默忽略）
+        self._ref_audio_paths: list[str] = []
         self._output_dir = ""
         self._worker = None
         self._setup_ui()
@@ -263,10 +353,15 @@ class TTSInferTab(QWidget):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(out_dir, f"gptsovits_{ts}.{fmt}")
 
+        # 主参考兜 ref_audio；辅助参考列表透传给 worker → runner → inp_refs
+        main_ref = self._ref_audio_paths[0] if self._ref_audio_paths else ""
+        aux_refs = list(self._ref_audio_paths[1:])
+
         return {
             "gpt_model":       self._gpt_path,
             "sovits_model":    self._sovits_path,
-            "ref_audio":       self._ref_audio_path,
+            "ref_audio":       main_ref,
+            "aux_ref_audios":  aux_refs,
             "ref_text":        ref_text,
             "ref_language":    self.ref_lang_combo.currentText(),
             "target_text":     target_text,
@@ -350,7 +445,7 @@ class TTSInferTab(QWidget):
         if not self._sovits_path:
             InfoBar.warning("缺少 SoVITS 模型", "请选择 .pth 文件", parent=self)
             return
-        if not self._ref_audio_path:
+        if not self._ref_audio_paths:
             InfoBar.warning("缺少参考音频", "请选择 3~10 秒的参考 wav", parent=self)
             return
         if not self._ref_text_edit.toPlainText().strip():
@@ -759,54 +854,82 @@ class TTSInferTab(QWidget):
             self._sovits_tag.setStyleSheet("color: #4CAF50;")
 
     def _pick_ref_audio(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择参考音频或 .list 数据集", "",
+        # getOpenFileNames 支持多选 wav/mp3/flac 做音色融合；
+        # .list 走单选 → 解析 → 多选 dialog
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "选择参考音频（可多选）或 .list 数据集", "",
             "音频或数据集 (*.wav *.mp3 *.flac *.list);;"
             "音频文件 (*.wav *.mp3 *.flac);;"
             "数据集列表 (*.list);;所有文件 (*)")
-        if not path:
+        if not paths:
             return
 
-        # .list 数据集：解析后弹窗让用户选一条，同时回填参考文本/语种
-        if path.lower().endswith(".list"):
-            try:
-                entries = parse_sovits_list_file(path)
-            except Exception as e:
-                InfoBar.error("解析失败", f".list 解析出错: {e}", parent=self)
+        # .list 与音频混选意义不大；若用户挑了 .list 就只看第一份 .list
+        list_files = [p for p in paths if p.lower().endswith(".list")]
+        if list_files:
+            new_paths = self._import_list_file(list_files[0])
+            if not new_paths:
                 return
-            if not entries:
-                # 一行都没解析成功 —— 格式问题
-                InfoBar.warning(
-                    "未找到可用条目",
-                    "该 .list 文件没有可识别的记录（字段格式不符）",
-                    parent=self,
-                )
-                return
-            if not any(e.get("exists") for e in entries):
-                # 解析得到条目，但音频全都对不上路径 —— 弹窗里依然显示，
-                # 同时给一条警告解释问题，避免用户陷入"看到列表却全灰"的困惑
-                InfoBar.warning(
-                    "音频文件均不存在",
-                    f"解析到 {len(entries)} 条记录，但音频路径全部失效（请检查 .list 中的路径或数据集是否完整）",
-                    parent=self,
-                )
+        else:
+            new_paths = paths
 
-            dlg = ListEntryPickerDialog(entries, parent=self)
-            if dlg.exec() != QDialog.DialogCode.Accepted or dlg.selected is None:
-                return
-            entry = dlg.selected
-            path = entry["audio"]
-            # 顺手回填参考文本和参考语种（用户仍可手动改）
-            if entry["text"]:
-                self._ref_text_edit.setPlainText(entry["text"])
-            if entry["lang"]:
-                idx = self.ref_lang_combo.findText(entry["lang"])
-                if idx >= 0:
-                    self.ref_lang_combo.setCurrentIndex(idx)
+        self._ref_audio_paths = list(new_paths)
+        self._refresh_ref_tag()
 
-        self._ref_audio_path = path
-        self._ref_tag.setText(Path(path).name)
-        self._ref_tag.setToolTip(path)
+    def _import_list_file(self, path: str) -> list[str]:
+        """解析 .list，弹多选 dialog，返回选中的音频路径列表（首条作主参考）。
+        过程中顺手回填参考文本与参考语种。
+        """
+        try:
+            entries = parse_sovits_list_file(path)
+        except Exception as e:
+            InfoBar.error("解析失败", f".list 解析出错: {e}", parent=self)
+            return []
+        if not entries:
+            # 一行都没解析成功 —— 格式问题
+            InfoBar.warning(
+                "未找到可用条目",
+                "该 .list 文件没有可识别的记录（字段格式不符）",
+                parent=self,
+            )
+            return []
+        if not any(e.get("exists") for e in entries):
+            # 解析得到条目，但音频全都对不上路径 —— 弹窗里依然显示，
+            # 同时给一条警告解释问题，避免用户陷入"看到列表却全灰"的困惑
+            InfoBar.warning(
+                "音频文件均不存在",
+                f"解析到 {len(entries)} 条记录，但音频路径全部失效。"
+                f"可点击对话框左下角\"重新选音频目录\"按 basename 重新匹配。",
+                parent=self,
+            )
+
+        dlg = ListEntryPickerDialog(entries, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.selected:
+            return []
+        picked = dlg.selected  # list[dict]
+        # 首条决定回填的参考文本和参考语种（用户仍可手动改）
+        first = picked[0]
+        if first["text"]:
+            self._ref_text_edit.setPlainText(first["text"])
+        if first["lang"]:
+            idx = self.ref_lang_combo.findText(first["lang"])
+            if idx >= 0:
+                self.ref_lang_combo.setCurrentIndex(idx)
+        return [e["audio"] for e in picked]
+
+    def _refresh_ref_tag(self):
+        """按 self._ref_audio_paths 更新 _ref_tag 显示与 ToolTip。"""
+        if not self._ref_audio_paths:
+            self._ref_tag.setText("未选择")
+            self._ref_tag.setToolTip("")
+            self._ref_tag.setStyleSheet("color: #8a8a8a;")
+            return
+        main = self._ref_audio_paths[0]
+        extra = len(self._ref_audio_paths) - 1
+        label = Path(main).name + (f"（+{extra} 辅助参考）" if extra else "")
+        self._ref_tag.setText(label)
+        # ToolTip 一行一个绝对路径，方便用户校对
+        self._ref_tag.setToolTip("\n".join(self._ref_audio_paths))
         self._ref_tag.setStyleSheet("color: #4CAF50;")
 
     def _pick_output_dir(self):

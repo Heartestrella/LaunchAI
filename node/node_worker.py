@@ -387,6 +387,34 @@ class FileOutputExec(NodeExecutor):
         return {}
 
 
+@register("text_input")
+class TextInputExec(NodeExecutor):
+    """文本输入节点。
+
+    把参数 ``text`` 中的内容落到磁盘文件 输出 ``NodeValue(type="text", path=...)``。
+    走文件而非 payload 字段是为了与现有 NodeValue 的 path 约定保持一致
+    下游 (gptsovits / whisper 的下游再接) 都按 path 读 不用特判 payload。
+    """
+
+    def execute(self, ctx, inputs, params):
+        text = (params.get("text") or "").strip()
+        if not text:
+            # 空文本不抛错 —— 与 file_input 空路径行为一致 下游缺输入会自报
+            ctx.log(GraphWorker._html(
+                "  · 未输入文本，跳过此节点", "#FF9800"))
+            return {}
+
+        out_dir = os.path.abspath("./output/_text_inputs")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(
+            out_dir, f"text_{uuid.uuid4().hex[:8]}.txt")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        ctx.log(GraphWorker._html(
+            f"  · 写入文本 ({len(text)} 字) → {out_path}", "#CCCCCC"))
+        return {"text_out": NodeValue(type="text", path=out_path)}
+
+
 @register("preview")
 class PreviewExec(NodeExecutor):
     """preview 节点只是 UI 上的展示，执行时把上游文件直通即可。"""
@@ -582,3 +610,363 @@ class WhisperExec(NodeExecutor):
         ctx.log(GraphWorker._html(
             f"  · whisper 完成，输出目录 {out_dir}", "#4CAF50"))
         return outputs
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：GPT-SoVITS .list 数据源
+# ══════════════════════════════════════════════════════════════════════
+
+@register("sovits_list_input")
+class SovitsListInputExec(NodeExecutor):
+    """解析 .list 数据集 取第 ``entry_index`` 条 输出 (音频, 文本)。
+
+    用于一次性驱动下游 gptsovits 节点的 ``ref_audio`` + ``ref_text``。
+    跟 subpage_gptsovits 里的 ListEntryPickerDialog 是同一份解析逻辑
+    (utils.sovits_list.parse_sovits_list_file) 字面值保持一致。
+
+    输出端口:
+        audio_out (audio)  该条目对应的音频文件
+        text_out  (text)   该条目对应的文本（写到 ./output/_text_inputs/）
+    日志中会打印总条数 / 当前条目语种 让用户决定 gptsovits 节点的
+    ref_language 设成什么；MVP 阶段不通过端口传递语种字段。
+    """
+
+    def execute(self, ctx, inputs, params):
+        from utils.sovits_list import parse_sovits_list_file
+
+        list_path = (params.get("list_path") or "").strip()
+        if not list_path:
+            ctx.log(GraphWorker._html(
+                "  · 未指定 .list 路径 跳过此节点", "#FF9800"))
+            return {}
+        if not os.path.isfile(list_path):
+            raise RuntimeError(f".list 文件不存在: {list_path}")
+
+        try:
+            entries = parse_sovits_list_file(list_path)
+        except Exception as exc:
+            raise RuntimeError(f".list 解析失败: {exc}") from exc
+
+        if not entries:
+            raise RuntimeError(
+                f".list 文件中没有可识别的条目（字段格式不符）: {list_path}")
+
+        # 可选：.list 原路径匹配不到时 用 audio_dir 按 basename 兜底
+        # 与 remap_entries_audio_root 的区别: 这里只补救"原路径找不到"的条目
+        # 原路径能用就保持不动 避免 audio_dir 里有同名但内容不同的文件覆盖
+        audio_dir = (params.get("audio_dir") or "").strip()
+        if audio_dir:
+            if not os.path.isdir(audio_dir):
+                raise RuntimeError(f"audio_dir 不是有效目录: {audio_dir}")
+            missing_entries = [e for e in entries if not e.get("exists")]
+            if missing_entries:
+                # 一次性建立 basename → 绝对路径索引 避免对每条都 walk
+                name_index: dict[str, str] = {}
+                for dirpath, _, filenames in os.walk(audio_dir):
+                    for fn in filenames:
+                        name_index.setdefault(
+                            fn, os.path.join(dirpath, fn))
+                recovered = 0
+                for e in missing_entries:
+                    base = os.path.basename(e["audio"])
+                    flat = os.path.join(audio_dir, base)
+                    if os.path.isfile(flat):
+                        new_path = flat
+                    elif base in name_index:
+                        new_path = name_index[base]
+                    else:
+                        continue
+                    e["audio"] = os.path.normpath(new_path)
+                    e["exists"] = True
+                    recovered += 1
+                ctx.log(GraphWorker._html(
+                    f"  · audio_dir 兜底: 缺失 {len(missing_entries)} 条 "
+                    f"恢复 {recovered} 条", "#CCCCCC"))
+
+        total   = len(entries)
+        usable  = [i for i, e in enumerate(entries) if e.get("exists")]
+        missing = total - len(usable)
+
+        ctx.log(GraphWorker._html(
+            f"  · 共 {total} 条 可用 {len(usable)} 条 缺失 {missing} 条",
+            "#CCCCCC"))
+
+        idx_raw = params.get("entry_index", 0)
+        try:
+            idx = int(idx_raw)
+        except (TypeError, ValueError):
+            raise RuntimeError(f"entry_index 不是整数: {idx_raw!r}")
+
+        # entry_index = -1 自动取首个可用 与 subpage "全选可用" 首条做主参考语义对齐
+        if idx < 0:
+            if not usable:
+                hint = ("（可填 audio_dir 参数按 basename 重新匹配）"
+                        if not audio_dir else "")
+                raise RuntimeError(
+                    f".list 中没有任何可用条目（{total} 条音频全部缺失）{hint}")
+            idx = usable[0]
+            ctx.log(GraphWorker._html(
+                f"  · entry_index=-1 自动选首个可用条目 → 第 {idx} 条",
+                "#CCCCCC"))
+        elif idx >= total:
+            raise RuntimeError(
+                f"entry_index={idx} 越界（共 {total} 条 0..{total - 1}）")
+
+        entry = entries[idx]
+        if not entry.get("exists"):
+            # 主动给出可用条目的索引提示 + audio_dir 补救建议
+            hint_parts = []
+            if usable:
+                preview = usable[:5]
+                more = f" 等共 {len(usable)} 条" if len(usable) > 5 else ""
+                hint_parts.append(f"可用条目索引: {preview}{more}")
+            if not audio_dir:
+                hint_parts.append(
+                    "或填写 audio_dir 参数指向本机音频目录按 basename 重新匹配")
+            hint = f"（{' ; '.join(hint_parts)}）" if hint_parts else ""
+            raise RuntimeError(
+                f"第 {idx} 条音频不存在: {entry['audio']}{hint}")
+
+        # 文本落盘 复用 text_input 节点的输出目录约定
+        out_dir = os.path.abspath("./output/_text_inputs")
+        os.makedirs(out_dir, exist_ok=True)
+        text_path = os.path.join(
+            out_dir, f"sovits_list_{uuid.uuid4().hex[:8]}.txt")
+        with open(text_path, "w", encoding="utf-8") as f:
+            f.write(entry["text"])
+
+        ctx.log(GraphWorker._html(
+            f"  · 选中第 {idx} 条 [{entry['speaker'] or '?'} · "
+            f"{entry['lang'] or '?'}] {entry['audio']}", "#4CAF50"))
+        ctx.log(GraphWorker._html(
+            f"  · 文本 ({len(entry['text'])} 字) → {text_path}", "#CCCCCC"))
+
+        return {
+            "audio_out": NodeValue(type="audio", path=entry["audio"]),
+            "text_out":  NodeValue(type="text",  path=text_path),
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：GPT-SoVITS
+# ══════════════════════════════════════════════════════════════════════
+
+@register("gptsovits")
+class GPTSoVITSExec(NodeExecutor):
+    """调用现有 GPTSoVITSInferWorker。
+
+    与 GPT-SoVITS 子页 UI 完全对齐：所有"用户在 UI 里要选/填的东西"都做成
+    输入端口 上游通常用 ``file_input`` (file 端口可桥接到 file/audio) 和
+    ``text_input`` (text 端口) 当源；端口未接时回退到同名 params。
+
+    输入端口（优先于同名参数）:
+        gpt_model    (file)   GPT .ckpt 路径
+        sovits_model (file)   SoVITS .pth 路径
+        ref_audio    (audio)  参考 wav (3~10s)
+        ref_text     (text)   参考文本文件 内容会被 open() 读出
+        target_text  (text)   目标文本文件 同上
+    输出端口:
+        audio_out    (audio)  合成后的 wav/flac
+    """
+
+    @staticmethod
+    def _resolve_path(inputs: dict, port: str,
+                      params: dict, key: str) -> str:
+        """文件类输入：端口优先 参数兜底。"""
+        v = inputs.get(port)
+        if v is not None and v.path:
+            return v.path
+        return (params.get(key) or "").strip()
+
+    @staticmethod
+    def _resolve_text(inputs: dict, port: str,
+                      params: dict, key: str,
+                      ctx: ExecutionContext) -> str:
+        """文本类输入：端口接通时读 NodeValue.path 文件 失败回退到参数。"""
+        v = inputs.get(port)
+        if v is not None and v.path and os.path.isfile(v.path):
+            try:
+                with open(v.path, "r", encoding="utf-8") as f:
+                    txt = f.read().strip()
+                if txt:
+                    ctx.log(GraphWorker._html(
+                        f"  · 从 {port} 端口读取 {len(txt)} 字", "#CCCCCC"))
+                    return txt
+            except Exception as exc:
+                ctx.log(GraphWorker._html(
+                    f"  · 读取 {port} 端口失败，回退到参数: {exc}",
+                    "#FF9800"))
+        return (params.get(key) or "").strip()
+
+    def execute(self, ctx, inputs, params):
+        from workers.gptsovits_worker import GPTSoVITSInferWorker
+
+        # ── 必填：模型 + 参考音频 ──────────────────────────────────────
+        gpt_path = self._resolve_path(inputs, "gpt_model", params, "gpt_model")
+        if not gpt_path:
+            raise RuntimeError(
+                "gptsovits 缺少 GPT 模型（gpt_model 端口未连接且参数也未填）")
+
+        sovits_path = self._resolve_path(
+            inputs, "sovits_model", params, "sovits_model")
+        if not sovits_path:
+            raise RuntimeError(
+                "gptsovits 缺少 SoVITS 模型（sovits_model 端口未连接且参数也未填）")
+
+        ref_audio = inputs.get("ref_audio")
+        if ref_audio is None or not ref_audio.path:
+            raise RuntimeError("gptsovits 缺少参考音频（ref_audio 未连接）")
+
+        ref_text = self._resolve_text(
+            inputs, "ref_text", params, "ref_text", ctx)
+        if not ref_text:
+            raise RuntimeError(
+                "gptsovits 缺少参考文本（ref_text 端口未连接且参数也未填）")
+
+        target_text = self._resolve_text(
+            inputs, "target_text", params, "target_text", ctx)
+        if not target_text:
+            raise RuntimeError(
+                "gptsovits 缺少目标文本（target_text 端口未连接且参数也未填）")
+
+        # ── 输出格式 + 路径 ───────────────────────────────────────────
+        fmt = str(params.get("format", "wav")).lower()
+        if fmt not in ("wav", "flac"):
+            fmt = "wav"
+
+        output_dir = (params.get("output")
+                      or os.path.abspath("./output"))
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(
+            output_dir, f"gptsovits_{uuid.uuid4().hex[:8]}.{fmt}")
+
+        worker_params = {
+            "gpt_model":       gpt_path,
+            "sovits_model":    sovits_path,
+            "ref_audio":       ref_audio.path,
+            "ref_text":        ref_text,
+            "ref_language":    params.get("ref_language", "中文"),
+            "target_text":     target_text,
+            "target_language": params.get("target_language", "中文"),
+            "output":          output_path,
+            "how_to_cut":      params.get("how_to_cut", "不切"),
+            "top_k":           int(params.get("top_k", 15) or 15),
+            "top_p":           float(params.get("top_p", 1.0) or 1.0),
+            "temperature":     float(params.get("temperature", 1.0) or 1.0),
+            "speed":           float(params.get("speed", 1.0) or 1.0),
+            "device":          params.get("device", "cuda:0"),
+        }
+
+        worker = GPTSoVITSInferWorker(worker_params)
+
+        def _fwd_output(line: str):
+            ctx.log(line)
+
+        def _fwd_progress(percent: int, status: str):
+            ctx.sub_progress(percent, status)
+
+        out_path, err = run_qthread_blocking(
+            worker,
+            on_output=_fwd_output,
+            on_progress=_fwd_progress,
+            on_cancelled=lambda: ctx.cancelled,
+        )
+        # 取消优先：避免给上层抛"输出文件无效"这类假错
+        if ctx.cancelled:
+            return {}
+        if err:
+            raise RuntimeError(err)
+        if not out_path or not os.path.isfile(out_path):
+            raise RuntimeError(f"gptsovits 输出文件无效: {out_path}")
+
+        ctx.log(GraphWorker._html(
+            f"  · gptsovits 完成，输出 {out_path}", "#4CAF50"))
+        return {"audio_out": NodeValue(type="audio", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：Real-ESRGAN 图像超分
+# ══════════════════════════════════════════════════════════════════════
+
+@register("realesrgan")
+class RealESRGANExec(NodeExecutor):
+    """调用 RealESRGANWorker（realesrgan-ncnn-vulkan）执行图像超分。
+
+    输入端口: image_in  (image)
+    输出端口: image_out (image)
+    """
+
+    @staticmethod
+    def _normalize_gpu_id(raw) -> str:
+        """属性面板里的设备值（cpu / cuda:N）转成 ncnn-vulkan 的 -g 参数。
+
+        - "cpu"      → "-1"   （worker 内部识别 -1 后不传 -g，走 CPU 路径）
+        - "cuda:N"   → "N"
+        - "auto"/"" → "auto"  （worker 不传 -g，让 ncnn 自动选第一张 GPU）
+        - 其它纯数字 / "-1" 直接透传
+        """
+        s = str(raw).strip().lower()
+        if s in ("", "auto"):
+            return "auto"
+        if s == "cpu":
+            return "-1"
+        if s.startswith("cuda:"):
+            return s.split(":", 1)[1] or "auto"
+        return s
+
+    def execute(self, ctx, inputs, params):
+        from workers.realesrgan_worker import RealESRGANWorker, DEFAULT_EXE
+
+        image_in = inputs.get("image_in")
+        if image_in is None or not image_in.path:
+            raise RuntimeError(
+                "real-esrgan 缺少图像输入（image_in 未连接）")
+
+        if not os.path.isfile(DEFAULT_EXE):
+            raise RuntimeError(
+                f"找不到 realesrgan-ncnn-vulkan.exe:\n{DEFAULT_EXE}\n"
+                "请确认 resource/realesrgan-ncnn-vulkan/ 目录完整。")
+
+        output_dir = (params.get("output")
+                      or os.path.abspath("./esrgan_results"))
+        os.makedirs(output_dir, exist_ok=True)
+
+        worker_params = {
+            "exe_path":   DEFAULT_EXE,
+            "input":      image_in.path,
+            "output_dir": output_dir,
+            "model":      params.get("model", "realesrgan-x4plus"),
+            "scale":      int(params.get("scale", 4) or 4),
+            "tile":       int(params.get("tile", 0) or 0),
+            "gpu_id":     self._normalize_gpu_id(params.get("gpu_id", "auto")),
+            "fmt":        str(params.get("fmt", "png")).lower(),
+            "tta":        bool(params.get("tta", False)),
+        }
+
+        worker = RealESRGANWorker(worker_params)
+
+        def _fwd_output(line: str):
+            ctx.log(line)
+
+        def _fwd_progress(percent: int, status: str):
+            ctx.sub_progress(percent, status)
+
+        # RealESRGANWorker.finished 是 pyqtSignal(str, float)
+        # run_qthread_blocking 内部的 _on_finished(payload) 只接 payload 一个参数，
+        # PyQt 允许槽函数参数比信号少 —— 末尾的 elapsed 会被丢弃，payload 即输出路径。
+        out_path, err = run_qthread_blocking(
+            worker,
+            on_output=_fwd_output,
+            on_progress=_fwd_progress,
+            on_cancelled=lambda: ctx.cancelled,
+        )
+        if ctx.cancelled:
+            return {}
+        if err:
+            raise RuntimeError(err)
+        if not out_path or not os.path.isfile(out_path):
+            raise RuntimeError(f"real-esrgan 输出文件无效: {out_path}")
+
+        ctx.log(GraphWorker._html(
+            f"  · real-esrgan 完成，输出 {out_path}", "#4CAF50"))
+        return {"image_out": NodeValue(type="image", path=out_path)}

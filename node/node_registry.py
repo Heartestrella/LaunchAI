@@ -20,6 +20,40 @@ PortDef = {
 
 from dataclasses import dataclass, field
 from typing import Any
+import os
+
+
+def _scan_realesrgan_models() -> list[str]:
+    """扫描 resource/realesrgan-ncnn-vulkan/models/*.param,返回可用模型名(stem)。
+
+    不同 ncnn-vulkan 发行版的模型命名差别很大（旧版 ``realesrgan-x4plus``、
+    新版 ``realesrgan-plus-x4`` 等），写死的列表很容易跟用户实际安装对不上。
+    所以这里在导入时扫一次,过滤掉 ``-wdn-`` 含 Clip 层的版本(ncnn-vulkan 不兼容)。
+    扫不到 → 返回 [] 让上层退回硬编码。
+    """
+    candidates = [
+        os.path.join(os.getcwd(), "resource",
+                     "realesrgan-ncnn-vulkan", "models"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "..", "resource", "realesrgan-ncnn-vulkan", "models"),
+    ]
+    for d in candidates:
+        if not os.path.isdir(d):
+            continue
+        try:
+            stems = []
+            for fn in sorted(os.listdir(d)):
+                if not fn.lower().endswith(".param"):
+                    continue
+                stem = os.path.splitext(fn)[0]
+                if "wdn" in stem.lower():
+                    continue
+                stems.append(stem)
+            if stems:
+                return stems
+        except OSError:
+            continue
+    return []
 
 
 # ── 端口类型颜色映射 ─────────────────────────────────────────────────
@@ -113,6 +147,18 @@ _reg(NodeDef(
         PortDef("file_out", "文件", "file"),
     ],
     params={"path": ""},
+))
+
+_reg(NodeDef(
+    id="text_input",
+    title="文本输入",
+    category="基础节点",
+    outputs=[
+        PortDef("text_out", "文本", "text"),
+    ],
+    # text 键名在 PropertyPanel._MULTILINE_TEXT_PARAM_KEYS 里
+    # 会自动渲染为多行 PlainTextEdit
+    params={"text": ""},
 ))
 
 _reg(NodeDef(
@@ -253,6 +299,76 @@ _reg(NodeDef(
 ))
 
 _reg(NodeDef(
+    id="sovits_list_input",
+    title="GPT-SoVITS .list 数据源",
+    category="音频",
+    # 解析 GPT-SoVITS .list 数据集 取出指定行的 (音频, 文本)
+    # 用于一次性给 gptsovits 节点喂参考音频 + 参考文本
+    # list_path 走 _FILE_PARAM_KEYS 自动获得文件浏览按钮
+    # audio_dir 走 _DIR_PARAM_KEYS 自动获得目录浏览按钮
+    # entry_index = -1 时自动取首个可用条目 与 subpage 的"全选可用"语义对齐
+    outputs=[
+        PortDef("audio_out", "参考音频", "audio"),
+        PortDef("text_out",  "参考文本", "text"),
+    ],
+    params={
+        "list_path":   "",   # .list 文件路径 浏览按钮自动出现
+        "audio_dir":   "",   # 音频根目录 跨机器场景按 basename 重映射 留空则按 .list 原路径
+        "entry_index": -1,   # -1 自动选首个可用 >=0 取指定条 SpinBox 渲染
+    },
+))
+
+_reg(NodeDef(
+    id="gptsovits",
+    title="GPT-SoVITS 语音合成",
+    category="音频",
+    # 所有可被上游驱动的输入都做成端口 同名 params 作为没接线时的兜底
+    # 上游通常用 file_input (file → file/audio bridge) 和 text_input (text)
+    inputs=[
+        PortDef("gpt_model",    "GPT 模型 (.ckpt)",        "file"),
+        PortDef("sovits_model", "SoVITS 模型 (.pth)",       "file"),
+        PortDef("ref_audio",    "参考音频 (3~10s)",         "audio"),
+        PortDef("ref_text",     "参考文本（与参考音频一致）", "text"),
+        PortDef("target_text",  "目标文本",                "text"),
+    ],
+    outputs=[
+        PortDef("audio_out", "合成音频", "audio"),
+    ],
+    params={
+        # 兜底：端口未接时从这里取
+        "gpt_model":       "",
+        "sovits_model":    "",
+        "ref_text":        "",
+        "target_text":     "",
+        # 真正只能从这里设的：语种 / 切分 / 采样 / 设备 / 格式
+        "ref_language":    "中文",
+        "target_language": "中文",
+        "how_to_cut":      "不切",
+        "top_k":           15,
+        "top_p":           1.0,
+        "temperature":     1.0,
+        "speed":           1.0,
+        "device":          "cpu",   # 默认安全值 GPU 由属性面板下拉显式选择
+        "format":          "wav",
+    },
+    param_choices={
+        # 字面值必须与 GPT-SoVITS inference_webui.dict_language_v2 一致
+        # 否则推理时 dict_language[text_language] 会 KeyError
+        "ref_language":    ["中文", "英文", "日文", "粤语", "韩文",
+                            "中英混合", "日英混合", "粤英混合", "韩英混合",
+                            "多语种混合", "多语种混合(粤语)"],
+        "target_language": ["中文", "英文", "日文", "粤语", "韩文",
+                            "中英混合", "日英混合", "粤英混合", "韩英混合",
+                            "多语种混合", "多语种混合(粤语)"],
+        # 与 inference_webui.how_to_cut 字面值一致 否则会静默不切
+        "how_to_cut":      ["不切", "凑四句一切", "凑50字一切",
+                            "按中文句号。切", "按英文句号.切",
+                            "按标点符号切"],
+        "format":          ["wav", "flac"],
+    },
+))
+
+_reg(NodeDef(
     id="audio_merge",
     title="音频合并",
     category="音频",
@@ -281,6 +397,19 @@ _reg(NodeDef(
 
 # ── 图像/视频节点 ─────────────────────────────────────────────────────
 
+# models 列表与默认模型 —— 优先用扫描到的真实文件,扫不到才退回历史命名
+_REALESRGAN_MODELS = _scan_realesrgan_models() or [
+    "realesrgan-x4plus", "realesrgan-x4plus-anime",
+    "realesr-animevideov3",
+]
+# 默认模型：优先选包含 "plus" 且不含 "anime" 的通用 4x 模型(同时兼容
+# 新命名 realesrgan-plus-x4 与旧命名 realesrgan-x4plus),否则取首个
+_REALESRGAN_DEFAULT_MODEL = next(
+    (m for m in _REALESRGAN_MODELS
+     if "plus" in m.lower() and "anime" not in m.lower()),
+    _REALESRGAN_MODELS[0],
+)
+
 _reg(NodeDef(
     id="realesrgan",
     title="Real-ESRGAN 超分",
@@ -292,16 +421,14 @@ _reg(NodeDef(
         PortDef("image_out", "超分图像", "image"),
     ],
     params={
-        "model":   "realesrgan-x4plus",
+        "model":   _REALESRGAN_DEFAULT_MODEL,
         "scale":   4,
         "tile":    512,
         "gpu_id":  "auto",
         "fmt":     "png",
     },
     param_choices={
-        "model": ["realesrgan-x4plus", "realesrgan-x4plus-anime",
-                  "realesr-animevideov3", "RealESRGAN_x4plus",
-                  "RealESRGAN_x4plus_anime_6B", "RealESRNet_x4plus"],
+        "model": _REALESRGAN_MODELS,
         "scale": [2, 3, 4],
         "fmt":   ["png", "jpg", "webp"],
     },

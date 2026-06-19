@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "iid": "62851d62",
+      "def_id": "preview",
+      "x": 532.5,
+      "y": 277.5,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": ""
+      }
+    },
+    {
+      "iid": "42863df3",
+      "def_id": "file_input",
+      "x": -66.5,
+      "y": 212.5,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "C:/Users/Administrator/Desktop/test/37db38244f52eac0ec12654d767d2087.png"
+      }
+    },
+    {
+      "iid": "73a9a785",
+      "def_id": "realesrgan",
+      "x": 237.5,
+      "y": 250.5,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "model": "realesrgan-x4plus",
+        "scale": 4,
+        "tile": 512,
+        "gpu_id": "cuda:0",
+        "fmt": "png"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "cid": "eb2dbe87",
+      "src_iid": "42863df3",
+      "src_port": "file_out",
+      "dst_iid": "73a9a785",
+      "dst_port": "image_in"
+    },
+    {
+      "cid": "b1e346c0",
+      "src_iid": "73a9a785",
+      "src_port": "image_out",
+      "dst_iid": "62851d62",
+      "dst_port": "input"
+    }
+  ]
+}

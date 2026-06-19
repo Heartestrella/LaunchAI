@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "iid": "5b20e4c4",
+      "def_id": "file_output",
+      "x": 370.6666666666667,
+      "y": 472.8,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "directory": "./output",
+        "filename": ""
+      }
+    },
+    {
+      "iid": "86f8f696",
+      "def_id": "preview",
+      "x": 369.2,
+      "y": 232.93333333333334,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": ""
+      }
+    },
+    {
+      "iid": "1e21b85a",
+      "def_id": "gptsovits",
+      "x": 59.31911139455792,
+      "y": 220.11936042274053,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "gpt_model": "",
+        "sovits_model": "",
+        "ref_text": "",
+        "target_text": "",
+        "ref_language": "中文",
+        "target_language": "中文",
+        "how_to_cut": "不切",
+        "top_k": 15,
+        "top_p": 1.0,
+        "temperature": 1.0,
+        "speed": 1.0,
+        "device": "cuda:0",
+        "format": "wav"
+      }
+    },
+    {
+      "iid": "c471aa58",
+      "def_id": "sovits_list_input",
+      "x": -268.16840566488656,
+      "y": 335.089808085936,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "list_path": "D:\\sovits_models\\486V2.5（8.16）\\486V2.5.list",
+        "entry_index": 0
+      }
+    },
+    {
+      "iid": "a3507efa",
+      "def_id": "file_input",
+      "x": -238.84747384828233,
+      "y": 150.02930812064378,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "D:/sovits_models/486V2.5（8.16）/安和昴V2.5-e30.ckpt"
+      }
+    },
+    {
+      "iid": "2fd0f7c1",
+      "def_id": "file_input",
+      "x": -236.5572442998303,
+      "y": 230.61536492857098,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "D:/sovits_models/486V2.5（8.16）/安和昴V2.5_e100_s2300.pth"
+      }
+    },
+    {
+      "iid": "3c58ee36",
+      "def_id": "text_input",
+      "x": -241.7237602046616,
+      "y": 464.9967967104673,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "text": "这是一段测试desuwa"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "cid": "81d080e3",
+      "src_iid": "c471aa58",
+      "src_port": "audio_out",
+      "dst_iid": "1e21b85a",
+      "dst_port": "ref_audio"
+    },
+    {
+      "cid": "60be2107",
+      "src_iid": "c471aa58",
+      "src_port": "text_out",
+      "dst_iid": "1e21b85a",
+      "dst_port": "ref_text"
+    },
+    {
+      "cid": "e871e7d7",
+      "src_iid": "a3507efa",
+      "src_port": "file_out",
+      "dst_iid": "1e21b85a",
+      "dst_port": "gpt_model"
+    },
+    {
+      "cid": "12873463",
+      "src_iid": "2fd0f7c1",
+      "src_port": "file_out",
+      "dst_iid": "1e21b85a",
+      "dst_port": "sovits_model"
+    },
+    {
+      "cid": "0f5dbe39",
+      "src_iid": "3c58ee36",
+      "src_port": "text_out",
+      "dst_iid": "1e21b85a",
+      "dst_port": "target_text"
+    },
+    {
+      "cid": "f445ccb0",
+      "src_iid": "1e21b85a",
+      "src_port": "audio_out",
+      "dst_iid": "86f8f696",
+      "dst_port": "input"
+    },
+    {
+      "cid": "cbedc480",
+      "src_iid": "1e21b85a",
+      "src_port": "audio_out",
+      "dst_iid": "5b20e4c4",
+      "dst_port": "file_in"
+    }
+  ]
+}

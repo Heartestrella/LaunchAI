@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 import traceback
+from types import SimpleNamespace
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _GIT_PROJECTS = os.path.normpath(
@@ -76,7 +77,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--gpt-model", required=True, help="GPT 权重 .ckpt 路径")
     parser.add_argument("--sovits-model", required=True, help="SoVITS 权重 .pth 路径")
-    parser.add_argument("--ref-audio", required=True, help="参考音频 wav 路径(3~10s)")
+    parser.add_argument("--ref-audio", required=True, help="主参考音频 wav 路径(3~10s)")
+    parser.add_argument("--aux-ref-audio", action="append", default=[],
+                        dest="aux_ref_audio",
+                        help="辅助参考音频路径，可重复传入；透传 inference_webui.get_tts_wav 的 inp_refs"
+                             "（v1/v2 系列做音色融合，v3/v4 模型会被静默忽略）")
     parser.add_argument("--ref-text", required=True, help="参考音频对应文本")
     parser.add_argument("--ref-language", default="中文",
                         help="参考文本语种，必须与 inference_webui.dict_language_v2 的键一致，"
@@ -157,6 +162,20 @@ def main():
         _err(traceback.format_exc())
         sys.exit(6)
 
+    # 辅助参考音频：缺失的跳过给警告，主参考兜底不致命
+    aux_refs = []
+    for p in (args.aux_ref_audio or []):
+        if not p:
+            continue
+        if not os.path.exists(p):
+            _err(f"辅助参考音频不存在，已跳过: {p}")
+            continue
+        # inference_webui 里读的是 path.name（Gradio 上传文件对象的属性）
+        # 这里用 SimpleNamespace 兼容上来
+        aux_refs.append(SimpleNamespace(name=p))
+    if aux_refs:
+        _log(f"辅助参考音频: {len(aux_refs)} 个（音色融合，v3/v4 模型会忽略）")
+
     _log("开始合成语音...")
     try:
         import numpy as np
@@ -165,7 +184,7 @@ def main():
         chunks = []
         sr = None
         # get_tts_wav 是一个 generator，逐块 yield (sample_rate, audio_ndarray)
-        gen = iw.get_tts_wav(
+        tts_kwargs = dict(
             ref_wav_path=args.ref_audio,
             prompt_text=args.ref_text,
             prompt_language=args.ref_language,
@@ -177,6 +196,9 @@ def main():
             temperature=args.temperature,
             speed=args.speed,
         )
+        if aux_refs:
+            tts_kwargs["inp_refs"] = aux_refs
+        gen = iw.get_tts_wav(**tts_kwargs)
         for sr_, audio in gen:
             sr = sr_
             chunks.append(audio)
