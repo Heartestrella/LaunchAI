@@ -35,6 +35,7 @@ from typing import Any, Callable
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
 
 from node.node_graph import NodeGraph, NodeInstance, Connection
+from utils import paths as _paths
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -141,6 +142,8 @@ class GraphWorker(QThread):
     output   = pyqtSignal(str)        # HTML 日志行
     finished = pyqtSignal(dict)       # {iid: {port: NodeValue}}
     error    = pyqtSignal(str)
+    # 当前正在执行的节点 iid;空串表示无节点在执行(用于画布上 ComfyUI 风格绿色高亮)
+    executing_node = pyqtSignal(str)
 
     def __init__(self, graph: NodeGraph, parent=None):
         super().__init__(parent)
@@ -189,6 +192,7 @@ class GraphWorker(QThread):
             for step, iid in enumerate(order):
                 if self._cancelled:
                     self._emit_log(self._html("用户取消了执行", "#FF9800"))
+                    self.executing_node.emit("")
                     self.error.emit("用户取消了执行")
                     return
 
@@ -218,10 +222,12 @@ class GraphWorker(QThread):
                     f"▶ [{step + 1}/{len(order)}] {node.title}",
                     "#60CDFF", bold=True))
                 self.progress.emit(ctx.cur_lo, node.title)
+                self.executing_node.emit(iid)
 
                 try:
                     outputs = executor.execute(ctx, inputs, dict(node.params))
                 except Exception as exc:
+                    self.executing_node.emit("")
                     self.error.emit(f"{node.title} 执行失败: {exc}")
                     return
 
@@ -229,11 +235,13 @@ class GraphWorker(QThread):
                     outputs = {}
                 self._results[iid] = outputs
 
+            self.executing_node.emit("")
             self.progress.emit(100, "完成")
             self._emit_log(self._html("✓ 全部节点执行完成", "#4CAF50", bold=True))
             self.finished.emit(self._results)
 
         except Exception as exc:
+            self.executing_node.emit("")
             self.error.emit(f"执行过程中发生异常: {exc}")
 
     # ── 内部 ──────────────────────────────────────────────────────────
@@ -370,7 +378,7 @@ class FileOutputExec(NodeExecutor):
             ctx.log(GraphWorker._html("  · 未接入文件，跳过保存", "#FF9800"))
             return {}
 
-        directory = (params.get("directory") or "./output").strip()
+        directory = (params.get("directory") or "").strip() or _paths.output_dir("node", "file_output")
         os.makedirs(directory, exist_ok=True)
 
         filename = (params.get("filename") or "").strip()
@@ -415,8 +423,7 @@ class TextInputExec(NodeExecutor):
                 "  · 未输入文本，跳过此节点", "#FF9800"))
             return {}
 
-        out_dir = os.path.abspath("./output/_text_inputs")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = _paths.output_dir("node", "text_inputs")
         out_path = os.path.join(
             out_dir, f"text_{uuid.uuid4().hex[:8]}.txt")
         with open(out_path, "w", encoding="utf-8") as f:
@@ -464,8 +471,7 @@ class DemucsExec(NodeExecutor):
         if audio_in is None or not audio_in.path:
             raise RuntimeError("demucs 缺少音频输入（audio_in 未连接）")
 
-        output_dir = (params.get("output")
-                      or os.path.abspath("./separated"))
+        output_dir = params.get("output") or _paths.output_dir("demucs_node")
         os.makedirs(output_dir, exist_ok=True)
 
         model = params.get("model", "htdemucs")
@@ -562,8 +568,7 @@ class WhisperExec(NodeExecutor):
         if audio_in is None or not audio_in.path:
             raise RuntimeError("whisper 缺少音频输入（audio_in 未连接）")
 
-        output_dir = (params.get("output")
-                      or os.path.abspath("./transcripts"))
+        output_dir = params.get("output") or _paths.output_dir("whisper_node")
         os.makedirs(output_dir, exist_ok=True)
 
         # "auto" 在 UI 侧表示"自动检测"；worker 透传给 whisper CLI 时需为 None
@@ -739,8 +744,7 @@ class SovitsListInputExec(NodeExecutor):
                 f"第 {idx} 条音频不存在: {entry['audio']}{hint}")
 
         # 文本落盘 复用 text_input 节点的输出目录约定
-        out_dir = os.path.abspath("./output/_text_inputs")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = _paths.output_dir("node", "text_inputs")
         text_path = os.path.join(
             out_dir, f"sovits_list_{uuid.uuid4().hex[:8]}.txt")
         with open(text_path, "w", encoding="utf-8") as f:
@@ -845,8 +849,7 @@ class GPTSoVITSExec(NodeExecutor):
         if fmt not in ("wav", "flac"):
             fmt = "wav"
 
-        output_dir = (params.get("output")
-                      or os.path.abspath("./output"))
+        output_dir = params.get("output") or _paths.output_dir("gptsovits_node")
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(
             output_dir, f"gptsovits_{uuid.uuid4().hex[:8]}.{fmt}")
@@ -938,8 +941,7 @@ class RealESRGANExec(NodeExecutor):
                 f"找不到 realesrgan-ncnn-vulkan.exe:\n{DEFAULT_EXE}\n"
                 "请确认 resource/realesrgan-ncnn-vulkan/ 目录完整。")
 
-        output_dir = (params.get("output")
-                      or os.path.abspath("./esrgan_results"))
+        output_dir = params.get("output") or _paths.output_dir("realesrgan_node")
         os.makedirs(output_dir, exist_ok=True)
 
         worker_params = {
@@ -1109,8 +1111,7 @@ class FormatConvertExec(NodeExecutor):
                     f"video 可以抽出 audio/image 流 其它跨类组合需要专门节点"
                 )
 
-        output_dir = os.path.abspath("./output/_format_convert")
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = _paths.output_dir("node", "format_convert")
         stem = os.path.splitext(os.path.basename(src.path))[0]
         out_path = os.path.join(output_dir, f"{stem}.{target_fmt}")
 
@@ -1217,8 +1218,7 @@ class ImageResizeExec(NodeExecutor):
             raise RuntimeError(f"非法宽高: {target_w}x{target_h}")
         keep_ratio = bool(params.get("keep_ratio", True))
 
-        output_dir = os.path.abspath("./output/_image_resize")
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = _paths.output_dir("node", "image_resize")
         ext = os.path.splitext(src.path)[1] or ".png"
         stem = os.path.splitext(os.path.basename(src.path))[0]
         out_path = os.path.join(output_dir, f"{stem}_resized{ext}")
@@ -1284,8 +1284,7 @@ class AudioMergeExec(NodeExecutor):
         if mode not in ("mix", "concat"):
             mode = "mix"
 
-        output_dir = os.path.abspath("./output/_audio_merge")
-        os.makedirs(output_dir, exist_ok=True)
+        output_dir = _paths.output_dir("node", "audio_merge")
         out_path = os.path.join(
             output_dir, f"merged_{mode}_{uuid.uuid4().hex[:8]}.wav")
 
@@ -1381,7 +1380,7 @@ class RVCExec(NodeExecutor):
             inputs, "index_path", params, "index_path")
         # index_path 可空 worker 内部自行处理
 
-        output_dir = os.path.abspath("./output/_rvc")
+        output_dir = params.get("output") or _paths.output_dir("rvc_node")
         os.makedirs(output_dir, exist_ok=True)
 
         fmt = str(params.get("format", "wav")).lower()

@@ -42,6 +42,7 @@ from qfluentwidgets import (
     PillPushButton,
 )
 from workers.yolo_worker import patch_yolo_page
+from utils import paths as _paths
 
 # ══════════════════════════════════════════════════════════════════════
 #  常量
@@ -907,7 +908,7 @@ class YoloParamPanel(QWidget):
         self._add_caption(lay, "输出目录", body)
         out_row = QHBoxLayout()
         self.out_dir_edit = LineEdit(body)
-        self.out_dir_edit.setText("./runs/detect")
+        self.out_dir_edit.setText(_paths.output_dir("yolo"))
         browse_btn = ToolButton(FIF.FOLDER, body)
         browse_btn.clicked.connect(self._browse_output)
         out_row.addWidget(self.out_dir_edit)
@@ -996,7 +997,7 @@ class YoloParamPanel(QWidget):
             "draw_boxes": self.box_switch.isChecked(),
             "draw_label": self.label_switch.isChecked(),
             "line_w":     self.line_w_slider.value(),
-            "out_dir":    self.out_dir_edit.text().strip() or "./runs/detect",
+            "out_dir":    self.out_dir_edit.text().strip() or _paths.output_dir("yolo"),
             "save_mode":  self.save_combo.currentText(),
         }
 

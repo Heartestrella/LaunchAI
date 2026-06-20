@@ -5,6 +5,8 @@ import time
 from logger import info, warning, debug, error
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 class DemucsWorker(QThread):
     """Demucs 音频分离工作线程"""
@@ -57,7 +59,7 @@ class DemucsWorker(QThread):
                 self.error.emit(f"输入文件不存在: {input_path}")
                 return
 
-            output_dir = self.params.get('output', './separated')
+            output_dir = self.params.get('output') or _paths.output_dir("demucs")
             model = self.params.get('model', 'htdemucs')
             device = self.params.get('device', 'cuda')
             shifts = self.params.get('shifts', 1)
@@ -117,7 +119,8 @@ class DemucsWorker(QThread):
             self.progress.emit(0, "准备开始分离...")
             self.output.emit(self._html(f"执行命令: {' '.join(cmd)}", "#888888"))
 
-            # 启动进程
+            # 启动进程：通过 TORCH_HOME 把 demucs 的模型缓存导向归一化 models 目录
+            env = _paths.subprocess_env(torch_home=_paths.model_dir("demucs"))
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -125,7 +128,8 @@ class DemucsWorker(QThread):
                 text=True,
                 bufsize=1,
                 encoding='utf-8',
-                errors='replace'
+                errors='replace',
+                env=env,
             )
 
             # 读取输出

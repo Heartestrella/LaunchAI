@@ -17,6 +17,7 @@ from qfluentwidgets import (
 )
 
 from workers.whisper_worker import WhisperWorker
+from utils import paths as _paths
 
 
 class LogTextEdit(TextEdit):
@@ -70,7 +71,7 @@ class WhisperWidget(QWidget):
         super().__init__(parent)
         self.device_options = device_options
         self._input_paths = []
-        self._output_dir = ""
+        self._output_dir = _paths.output_dir("whisper")
         self._worker = None
         self._setup_ui()
         self._connect_signals()

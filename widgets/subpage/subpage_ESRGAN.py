@@ -35,6 +35,7 @@ from qfluentwidgets import (
     HorizontalFlipView,
 )
 from workers.realesrgan_worker import patch_inference_page
+from utils import paths as _paths
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -888,7 +889,7 @@ class ParamPanel(QWidget):
         self._add_caption(lay, "输出目录", container)
         out_row = QHBoxLayout()
         self.out_dir_edit = LineEdit(container)
-        self.out_dir_edit.setText("./results")
+        self.out_dir_edit.setText(_paths.output_dir("realesrgan"))
         self.out_dir_edit.setPlaceholderText("选择输出文件夹…")
         self.out_dir_edit.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1008,7 +1009,7 @@ class ParamPanel(QWidget):
             "fp16":        self.fp16_switch.isChecked(),
             "face_enh":    self.face_switch.isChecked(),
             "face_str":    self.face_slider.value() / 100.0,
-            "out_dir":     self.out_dir_edit.text().strip() or "./results",
+            "out_dir":     self.out_dir_edit.text().strip() or _paths.output_dir("realesrgan"),
             "out_fmt":     fmt,
             "fmt":         fmt,
             "keep_suffix": self.suffix_switch.isChecked(),

@@ -10,6 +10,7 @@ from qfluentwidgets import (
     IconWidget, InfoBar, ExpandGroupSettingCard, SpinBox
 )
 from widgets.audio_waveform_widget import AudioWaveformWidget
+from utils import paths as _paths
 import os
 
 
@@ -21,7 +22,7 @@ class AudioSeparationWidget(QWidget):
         # self.setObjectName("audioSeparationInterface")
         self.device_options = device_options
         self._input_path = ""
-        self._output_dir = ""
+        self._output_dir = _paths.output_dir("demucs")
         self._waveform_previews = []
         self._setup_ui()
         self._connect_signals()

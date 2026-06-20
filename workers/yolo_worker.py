@@ -23,7 +23,7 @@ fp16        : bool  半精度推理（默认 True）
 tta         : bool  TTA 测试时增强（默认 False）
 agnostic    : bool  类别无关 NMS（默认 False）
 classes     : list  类别 id 过滤，None=全部
-out_dir     : str   输出目录（默认 "./runs/detect"）
+out_dir     : str   输出目录（默认 paths.output_dir("yolo")）
 save_mode   : str   "不保存" / "图片+TXT(YOLO)" / "图片+JSON(COCO)" / "仅图片"
 draw_boxes  : bool  绘制检测框（默认 True）
 draw_label  : bool  绘制类别标签（默认 True）
@@ -42,6 +42,8 @@ from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 # ── 内置权重列表（仅用于 UI 默认下拉项；用户也可手动指定路径）──────────
 YOLO_MODELS = {
@@ -57,7 +59,10 @@ YOLO_MODELS = {
     "yolo11x.pt":  "YOLOv11 X-Large",
 }
 
-DEFAULT_WEIGHTS_DIR = os.path.join(os.getcwd(), "resource", "yolo", "weights")
+# 归一化权重目录：新下载落 <root>/models/yolo/；保留 resource/yolo/weights/
+# 作为兼容扫描位置，避免老用户已下载的权重失效。
+LEGACY_WEIGHTS_DIR = os.path.join(os.getcwd(), "resource", "yolo", "weights")
+DEFAULT_WEIGHTS_DIR = _paths.model_dir("yolo")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -127,7 +132,7 @@ class YoloWorker(QThread):
         tta = bool(p.get("tta",     False))
         agnostic = bool(p.get("agnostic", False))
         classes = p.get("classes",      None)
-        out_dir = p.get("out_dir",      "./runs/detect")
+        out_dir = p.get("out_dir") or _paths.output_dir("yolo")
         save_mode = p.get("save_mode",    "图片+TXT(YOLO)")
         draw_boxes = bool(p.get("draw_boxes", True))
         draw_label = bool(p.get("draw_label", True))
@@ -158,11 +163,13 @@ class YoloWorker(QThread):
         os.makedirs(weights_dir, exist_ok=True)
 
         # 如果传的是纯文件名（不含路径分隔符且非绝对路径），
-        # 优先在 weights_dir 里找，找到就用绝对路径
+        # 优先在 weights_dir 里找；找不到再去兼容目录 LEGACY_WEIGHTS_DIR 找。
         if not os.path.isabs(weights) and not any(s in weights for s in ("/", "\\")):
-            candidate = os.path.join(weights_dir, weights)
-            if os.path.isfile(candidate):
-                weights = candidate
+            for d in (weights_dir, LEGACY_WEIGHTS_DIR):
+                candidate = os.path.join(d, weights)
+                if os.path.isfile(candidate):
+                    weights = candidate
+                    break
 
         # ── 加载模型 ─────────────────────────────────────────────────
         self.progress.emit(0, "加载模型…")
@@ -466,14 +473,18 @@ def detect_gpus() -> dict[str, str]:
 #  权重发现 —— 扫描 weights/ 目录
 # ══════════════════════════════════════════════════════════════════════
 def discover_weights(weights_dir: str = DEFAULT_WEIGHTS_DIR) -> list[str]:
-    """返回目录下所有 .pt 文件的绝对路径列表。"""
-    if not os.path.isdir(weights_dir):
-        return []
-    out = []
-    for fn in sorted(os.listdir(weights_dir)):
-        if fn.lower().endswith((".pt", ".onnx", ".engine")):
-            out.append(os.path.join(weights_dir, fn))
-    return out
+    """
+    返回 weights_dir + 兼容目录 LEGACY_WEIGHTS_DIR 下所有 .pt/.onnx/.engine
+    文件的绝对路径列表。同名权重以新目录为准。
+    """
+    seen: dict[str, str] = {}
+    for d in (weights_dir, LEGACY_WEIGHTS_DIR):
+        if not d or not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if fn.lower().endswith((".pt", ".onnx", ".engine")):
+                seen.setdefault(fn, os.path.join(d, fn))
+    return list(seen.values())
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -517,7 +528,7 @@ def build_worker_from_ui_params(files: list[str], ui_params: dict,
         "tta":        bool(ui_params.get("tta", False)),
         "agnostic":   bool(ui_params.get("agnostic", False)),
         "classes":    ui_params.get("classes", None),
-        "out_dir":    ui_params.get("out_dir", "./results/detect"),
+        "out_dir":    ui_params.get("out_dir") or _paths.output_dir("yolo"),
         "save_mode":  ui_params.get("save_mode", "图片+TXT(YOLO)"),
         "draw_boxes": bool(ui_params.get("draw_boxes", True)),
         "draw_label": bool(ui_params.get("draw_label", True)),

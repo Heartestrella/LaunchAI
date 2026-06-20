@@ -88,7 +88,7 @@
         {
           "title": "untitled.node",
           "current_file": "C:/Users/Administrator/Desktop/LaunchAI/configs/nodes/untitled.node",
-          "dirty": false,
+          "dirty": true,
           "graph": {
             "version": 1,
             "nodes": [
@@ -107,8 +107,8 @@
               {
                 "iid": "86f8f696",
                 "def_id": "preview",
-                "x": 369.2,
-                "y": 232.93333333333334,
+                "x": 432.98579953336645,
+                "y": 236.29048067719472,
                 "w": 0.0,
                 "h": 0.0,
                 "params": {
@@ -514,5 +514,8 @@
       ],
       "current_index": 0
     }
+  },
+  "paths": {
+    "root": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data"
   }
 }

@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 class WhisperWorker(QThread):
     """Whisper 语音转录工作线程"""
@@ -52,7 +54,8 @@ class WhisperWorker(QThread):
                     self.error.emit(f"输入文件不存在: {file_path}")
                     return
 
-            output_dir = self.params.get('output', './transcripts')
+            output_dir = self.params.get('output') or _paths.output_dir("whisper")
+            whisper_model_dir = _paths.model_dir("whisper")
             model = self.params.get('model', 'small')
             device = self.params.get('device', 'cpu')
             language = self.params.get('language', None)
@@ -86,7 +89,8 @@ class WhisperWorker(QThread):
 
                 cmd = [sys.executable, "-m", "whisper", input_path,
                        "--model", model, "--device", device,
-                       "--output_dir", output_dir]
+                       "--output_dir", output_dir,
+                       "--model_dir", whisper_model_dir]
 
                 # whisper CLI 的 --output_format 是 store 而非 append，
                 # 多次传只会保留最后一个；想要同时产出 txt/srt/vtt/json
@@ -120,6 +124,7 @@ class WhisperWorker(QThread):
                 self.output.emit(self._html(
                     f"执行命令: {' '.join(cmd)}", "#888888"))
 
+                env = _paths.subprocess_env(torch_home=whisper_model_dir)
                 self.process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -127,7 +132,8 @@ class WhisperWorker(QThread):
                     text=True,
                     bufsize=1,
                     encoding='utf-8',
-                    errors='replace'
+                    errors='replace',
+                    env=env,
                 )
 
                 for line in iter(self.process.stdout.readline, ''):

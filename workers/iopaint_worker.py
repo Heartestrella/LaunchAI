@@ -19,13 +19,15 @@ from typing import Optional
 import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 MODELS = ["lama", "ldm", "mat", "fcf", "manga", "zits"]
 HD_STRATEGIES = ["CROP", "RESIZE", "ORIGINAL"]
 SAM_MODELS = ["mobile_sam", "vit_b", "sam2_tiny", "sam2_small"]
 
-DEFAULT_OUT_DIR = os.path.join(os.getcwd(), "results", "iopaint")
+DEFAULT_OUT_DIR = _paths.output_dir("iopaint")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -82,6 +84,13 @@ class IOPaintWorker(QThread):
         lama_url = p.get("lama_model_url")
         if lama_url:
             os.environ["LAMA_MODEL_URL"] = str(lama_url)
+
+        # 2b) 在 import iopaint 之前把模型缓存目录指向归一化 models 目录
+        #     IOPaint 通过 XDG_CACHE_HOME 决定主缓存；HF/torch 也同步，否则
+        #     底层 lama/mat/etc. 仍可能落到 ~/.cache。
+        _iopaint_models = _paths.model_dir("iopaint")
+        _paths.apply_inproc_env(
+            xdg=_iopaint_models, hf=_iopaint_models, torch=_iopaint_models)
 
         # 3) 懒导入 —— 让页面在没装 iopaint 时仍能 import 本模块
         try:

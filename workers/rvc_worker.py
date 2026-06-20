@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _INFER_RUNNER = os.path.join(_THIS_DIR, "_rvc_runner.py")
@@ -87,7 +89,7 @@ class RVCInferWorker(QThread):
                     f"⚠️ 索引文件不存在，将忽略检索: {index_path}", "#FF9800"))
                 index_path = ''
 
-            output_dir = self.params.get('output', './rvc_output')
+            output_dir = self.params.get('output') or _paths.output_dir("rvc")
             device = self.params.get('device', 'cuda:0')
             f0_method = self.params.get('f0_method', 'rmvpe')
             transpose = int(self.params.get('transpose', 0))

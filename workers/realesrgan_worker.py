@@ -28,6 +28,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from utils import paths as _paths
+
 
 # ── 支持的模型列表 ──────────────────────────────────────────────────────
 MODELS = {
@@ -100,7 +102,7 @@ class RealESRGANWorker(QThread):
         # ── 参数解析 ──────────────────────────────────────────────────
         exe_path = p.get("exe_path",   DEFAULT_EXE)
         input_path = p.get("input",      "")
-        output_dir = p.get("output_dir", "./results")
+        output_dir = p.get("output_dir") or _paths.output_dir("realesrgan")
         model_name = p.get("model",      "realesrgan-x4plus")
         scale = int(p.get("scale",  4))
         tile = int(p.get("tile",   0))
@@ -486,7 +488,7 @@ def build_worker_from_ui_params(files: list[str], ui_params: dict,
 
     worker_params = {
         "exe_path":   exe_path,
-        "output_dir": ui_params.get("out_dir", "./results"),
+        "output_dir": ui_params.get("out_dir") or ui_params.get("output_dir") or _paths.output_dir("realesrgan"),
         "model":      model,
         "scale":      scale,
         "tile":       int(ui_params.get("tile", 0)),

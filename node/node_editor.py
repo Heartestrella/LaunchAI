@@ -1279,6 +1279,11 @@ class NodeEditorPage(QWidget):
             lambda r, _d=doc: self._on_runner_finished(_d, r))
         runner.error.connect(
             lambda m, _d=doc: self._on_runner_error(_d, m))
+        # 节点级运行高亮:把当前正在执行的节点 iid 推给对应画布(切 tab 也不丢)
+        # tab 关闭后 canvas 会被 deleteLater 此时不能再调用其方法 故先检查 doc 是否还活着
+        runner.executing_node.connect(
+            lambda iid, _d=doc: _d.canvas.set_executing_node(iid)
+            if _d in self._docs else None)
         runner.start()
         doc.runner = runner
 

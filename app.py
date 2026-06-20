@@ -16,6 +16,8 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 from utils.atool import resource_path
+from utils import paths as _paths
+_paths.ensure_defaults()
 current_path = os.environ.get("PATH", "")
 ffmpeg_path = resource_path(os.path.join("resource", "ffmepg", "bin"))
 if ffmpeg_path not in current_path:

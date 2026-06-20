@@ -168,7 +168,8 @@ _reg(NodeDef(
     inputs=[
         PortDef("file_in", "文件", "file"),
     ],
-    params={"directory": "./output", "filename": ""},
+    # directory 留空时 file_output 执行器会落到归一化 outputs/node/file_output/
+    params={"directory": "", "filename": ""},
 ))
 
 _reg(NodeDef(

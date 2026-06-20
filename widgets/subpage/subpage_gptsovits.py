@@ -21,6 +21,8 @@ from qfluentwidgets import (
     IconWidget, InfoBar, FluentIcon as FIF, TextEdit, Pivot,
 )
 
+from utils import paths as _paths
+
 
 # GPT-SoVITS .list 文件每行格式：vocal_path|speaker_name|language|text
 # 语言代码 → UI 下拉框使用的中文名（dict_language_v2 的字面值）
@@ -349,7 +351,7 @@ class TTSInferTab(QWidget):
         target_text = self._target_text_edit.toPlainText().strip()
         fmt = self.fmt_combo.currentText()
 
-        out_dir = self._output_dir or os.path.join(os.getcwd(), "gptsovits_output")
+        out_dir = self._output_dir or _paths.output_dir("gptsovits")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(out_dir, f"gptsovits_{ts}.{fmt}")
 

@@ -58,6 +58,7 @@ C_NODE_BODY = QColor(53, 53, 53)
 C_NODE_HEADER = QColor(45, 45, 45)
 C_NODE_BORDER = QColor(0, 0, 0)
 C_NODE_SELECTED = QColor(255, 255, 255)
+C_NODE_EXECUTING = QColor(76, 220, 100)   # ComfyUI 风格运行中绿色高亮
 C_SHADOW = QColor(0, 0, 0, 130)
 
 C_TITLE_TEXT = QColor(255, 255, 255)
@@ -124,6 +125,9 @@ class NodeCanvas(QWidget):
         self._resize_start:  QPointF | None = None
         self._resize_orig_w: float = 0
         self._resize_orig_h: float = 0
+
+        # 正在执行的节点 iid (ComfyUI 风格绿色外框)
+        self._executing_iid: str | None = None
 
         # 预览 overlay
         # 音/视频/图片走 widget overlay；文本类直接缓存内容,在 _draw_node
@@ -413,7 +417,11 @@ class NodeCanvas(QWidget):
             )
 
         # 边框
-        if selected:
+        executing = node.iid == self._executing_iid
+        if executing:
+            # 运行中节点：粗绿色外框 优先级高于选中态 (ComfyUI 风格)
+            pen = QPen(C_NODE_EXECUTING, 3.0)
+        elif selected:
             pen = QPen(C_NODE_SELECTED, 1.5)
         else:
             pen = QPen(C_NODE_BORDER, 1.0)
@@ -1007,6 +1015,14 @@ class NodeCanvas(QWidget):
             self.remove_preview(iid)
 
     # ── 公共方法 ──────────────────────────────────────────────────────
+    def set_executing_node(self, iid: str | None):
+        """设置当前正在执行的节点 iid;空串/None 表示无节点在执行。"""
+        new_iid = iid or None
+        if new_iid == self._executing_iid:
+            return
+        self._executing_iid = new_iid
+        self.update()
+
     def fit_view(self):
         if not self.graph.nodes:
             return

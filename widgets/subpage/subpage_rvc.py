@@ -19,6 +19,7 @@ from qfluentwidgets import (
 )
 
 from workers.rvc_worker import RVCInferWorker, RVCRealtimeWorker
+from utils import paths as _paths
 
 
 class LogTextEdit(TextEdit):
@@ -82,7 +83,7 @@ class BatchInferTab(QWidget):
         super().__init__(parent)
         self.device_options = device_options or {}
         self._input_paths = []
-        self._output_dir = ""
+        self._output_dir = _paths.output_dir("rvc")
         self._model_path = ""
         self._index_path = ""
         self._worker = None
