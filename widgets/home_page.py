@@ -42,8 +42,8 @@ _BANNER_IMG_PATH = resource_path(os.path.join("resource", "home_bg"))
 FOLDERS = [
     {"icon": FIF.FOLDER,       "name": "根目录",     "path": "."},
     {"icon": FIF.APPLICATION,  "name": "用户配置",  "path": "configs"},
-    {"icon": FIF.PHOTO,        "name": "输入图片",    "path": "input"},
-    {"icon": FIF.SAVE_COPY,    "name": "输出",    "path": "results"},
+    {"icon": FIF.PHOTO,        "name": "节点",    "path": "configs/nodes"},
+    {"icon": FIF.SAVE_COPY,    "name": "输出",    "path": "output"},
 ]
 
 NOTICES = [

@@ -72,11 +72,23 @@ def _parse_device(device: str) -> int:
 
 
 def _normalize_f0(method: str) -> str:
-    """Applio 不识别 rmvpe+，回退为 rmvpe。"""
+    """老配置里残留的 f0 算法名 → Applio 3.6+ 仍然合法的值。
+
+    Applio 在 3.6 移除了 ``rmvpe+`` / ``pm`` / ``harvest`` 这几个旧选项，
+    传过去会直接 ``exit=2 invalid choice``。这里把它们映射到当前可用的
+    最接近的替代品（统一回退到 rmvpe，质量损失最小），其它已知合法值
+    （含 hybrid 形式）原样透传。完全不认识的值不再特判，交给 Applio
+    自己抛错以暴露问题。
+    """
     method = (method or "rmvpe").strip().lower()
-    if method == "rmvpe+":
-        return "rmvpe"
-    return method
+    # 旧值 → 新值的迁移表
+    legacy = {
+        "rmvpe+":  "rmvpe",
+        "pm":      "rmvpe",
+        "harvest": "rmvpe",
+        "dio":     "rmvpe",   # 历史 alias 顺手挡掉
+    }
+    return legacy.get(method, method)
 
 
 def main():

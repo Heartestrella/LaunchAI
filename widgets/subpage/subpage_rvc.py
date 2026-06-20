@@ -352,8 +352,13 @@ class BatchInferTab(QWidget):
         f0_box = QVBoxLayout()
         f0_box.addWidget(CaptionLabel("音高提取算法 (F0)"))
         self.f0_combo = ComboBox()
-        # Applio 支持的 F0 算法（已移除 rmvpe+，Applio 不识别）
-        self.f0_combo.addItems(["rmvpe", "crepe", "harvest", "pm"])
+        # Applio 3.6+ 的合法值 旧版的 rmvpe+ / pm / harvest 都已被移除
+        # 老配置里若是这几个,_rvc_runner._normalize_f0 会自动映射成 rmvpe
+        self.f0_combo.addItems([
+            "rmvpe", "crepe", "crepe-tiny", "fcpe",
+            "hybrid[crepe+rmvpe]", "hybrid[crepe+fcpe]",
+            "hybrid[rmvpe+fcpe]", "hybrid[crepe+rmvpe+fcpe]",
+        ])
         self.f0_combo.setCurrentText("rmvpe")
         self.f0_combo.setFixedWidth(140)
         f0_box.addWidget(self.f0_combo)

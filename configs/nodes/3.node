@@ -1,0 +1,181 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "iid": "0a979d50",
+      "def_id": "file_input",
+      "x": 473.3053100309137,
+      "y": 289.1262713057176,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "D:/ccswitch/1/gbc/nina/nina2.pth"
+      }
+    },
+    {
+      "iid": "d034ed06",
+      "def_id": "file_input",
+      "x": 469.6389351284423,
+      "y": 390.9843608356228,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "D:/ccswitch/1/gbc/nina/added_IVF110_Flat_nprobe_1_nina2_v2.index"
+      }
+    },
+    {
+      "iid": "f6db90f3",
+      "def_id": "rvc",
+      "x": 840.99312756987,
+      "y": 337.4711982070289,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "model_path": "",
+        "index_path": "",
+        "device": "cuda:0",
+        "f0_method": "hybrid[crepe+rmvpe]",
+        "transpose": 3,
+        "index_rate": 0.75,
+        "filter_radius": 3,
+        "resample_sr": 0,
+        "rms_mix_rate": 0.25,
+        "protect": 0.33,
+        "split_infer": false,
+        "format": "wav"
+      }
+    },
+    {
+      "iid": "3934800d",
+      "def_id": "demucs",
+      "x": 482.68111535448634,
+      "y": 83.42104160711845,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "model": "htdemucs",
+        "device": "cuda:0",
+        "shifts": 1,
+        "overlap": 0.25,
+        "format": "wav"
+      }
+    },
+    {
+      "iid": "ed4b2306",
+      "def_id": "file_input",
+      "x": 202.9181754068324,
+      "y": 84.20812756124373,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "C:/Users/Administrator/Desktop/test/あいつら全員同窓会.m4a"
+      }
+    },
+    {
+      "iid": "bf81a452",
+      "def_id": "preview",
+      "x": 1268.548033328313,
+      "y": 343.93296467489137,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\output\\_rvc\\vocals_rvc.wav"
+      }
+    },
+    {
+      "iid": "9481a75b",
+      "def_id": "audio_merge",
+      "x": 1077.2112112034174,
+      "y": 90.63781798753493,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "mode": "mix",
+        "weights": ""
+      }
+    },
+    {
+      "iid": "d423483f",
+      "def_id": "preview",
+      "x": 1352.7896817941642,
+      "y": 91.16108755183264,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\output\\_audio_merge\\merged_mix_925ee4a4.wav"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "cid": "0d3651a5",
+      "src_iid": "0a979d50",
+      "src_port": "file_out",
+      "dst_iid": "f6db90f3",
+      "dst_port": "model_path"
+    },
+    {
+      "cid": "04faf0a0",
+      "src_iid": "d034ed06",
+      "src_port": "file_out",
+      "dst_iid": "f6db90f3",
+      "dst_port": "index_path"
+    },
+    {
+      "cid": "e77e5f89",
+      "src_iid": "3934800d",
+      "src_port": "vocals",
+      "dst_iid": "f6db90f3",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "7c4c9c89",
+      "src_iid": "ed4b2306",
+      "src_port": "file_out",
+      "dst_iid": "3934800d",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "d06011d8",
+      "src_iid": "f6db90f3",
+      "src_port": "audio_out",
+      "dst_iid": "bf81a452",
+      "dst_port": "input"
+    },
+    {
+      "cid": "f180238c",
+      "src_iid": "3934800d",
+      "src_port": "drums",
+      "dst_iid": "9481a75b",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "b4479746",
+      "src_iid": "3934800d",
+      "src_port": "bass",
+      "dst_iid": "9481a75b",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "95980b53",
+      "src_iid": "3934800d",
+      "src_port": "other",
+      "dst_iid": "9481a75b",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "154a00f8",
+      "src_iid": "f6db90f3",
+      "src_port": "audio_out",
+      "dst_iid": "9481a75b",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "70ff62ee",
+      "src_iid": "9481a75b",
+      "src_port": "merged",
+      "dst_iid": "d423483f",
+      "dst_port": "input"
+    }
+  ]
+}

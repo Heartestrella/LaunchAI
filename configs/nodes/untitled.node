@@ -21,7 +21,7 @@
       "w": 0.0,
       "h": 0.0,
       "params": {
-        "path": ""
+        "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\output\\gptsovits_548bffe5.wav"
       }
     },
     {
@@ -36,9 +36,9 @@
         "sovits_model": "",
         "ref_text": "",
         "target_text": "",
-        "ref_language": "中文",
-        "target_language": "中文",
-        "how_to_cut": "不切",
+        "ref_language": "日文",
+        "target_language": "多语种混合",
+        "how_to_cut": "凑四句一切",
         "top_k": 15,
         "top_p": 1.0,
         "temperature": 1.0,
@@ -50,12 +50,13 @@
     {
       "iid": "c471aa58",
       "def_id": "sovits_list_input",
-      "x": -268.16840566488656,
-      "y": 335.089808085936,
+      "x": -237.09973655034509,
+      "y": 330.65142678385865,
       "w": 0.0,
       "h": 0.0,
       "params": {
         "list_path": "D:\\sovits_models\\486V2.5（8.16）\\486V2.5.list",
+        "audio_dir": "D:/sovits_models/486V2.5（8.16）/486V2.5",
         "entry_index": 0
       }
     },
@@ -89,7 +90,66 @@
       "w": 0.0,
       "h": 0.0,
       "params": {
-        "text": "这是一段测试desuwa"
+        "text": "这是一段测试ですわ ですわ"
+      }
+    },
+    {
+      "iid": "834de837",
+      "def_id": "format_convert",
+      "x": 372.6898523186088,
+      "y": 128.74779922461045,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "target_format": "mp3"
+      }
+    },
+    {
+      "iid": "62d9ca49",
+      "def_id": "file_output",
+      "x": 647.8740907615485,
+      "y": 125.65531812101713,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "directory": "./output",
+        "filename": ""
+      }
+    },
+    {
+      "iid": "6f4db680",
+      "def_id": "whisper",
+      "x": 369.06380166878165,
+      "y": 562.9776993236434,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "model": "small",
+        "language": "auto",
+        "device": "cuda:0",
+        "task": "transcribe"
+      }
+    },
+    {
+      "iid": "d1968abf",
+      "def_id": "preview",
+      "x": 689.7063367082137,
+      "y": 476.1587868966937,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\transcripts\\gptsovits_548bffe5.txt"
+      }
+    },
+    {
+      "iid": "84fd852a",
+      "def_id": "text_note",
+      "x": 58.47955637365013,
+      "y": 86.66527390741436,
+      "w": 0.0,
+      "h": 0.0,
+      "params": {
+        "text": "原神NB\n"
       }
     }
   ],
@@ -142,6 +202,34 @@
       "src_port": "audio_out",
       "dst_iid": "5b20e4c4",
       "dst_port": "file_in"
+    },
+    {
+      "cid": "168ab31e",
+      "src_iid": "1e21b85a",
+      "src_port": "audio_out",
+      "dst_iid": "834de837",
+      "dst_port": "file_in"
+    },
+    {
+      "cid": "ee86c1a7",
+      "src_iid": "834de837",
+      "src_port": "file_out",
+      "dst_iid": "62d9ca49",
+      "dst_port": "file_in"
+    },
+    {
+      "cid": "d563a012",
+      "src_iid": "1e21b85a",
+      "src_port": "audio_out",
+      "dst_iid": "6f4db680",
+      "dst_port": "audio_in"
+    },
+    {
+      "cid": "109560f4",
+      "src_iid": "6f4db680",
+      "src_port": "transcript",
+      "dst_iid": "d1968abf",
+      "dst_port": "input"
     }
   ]
 }

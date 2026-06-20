@@ -237,20 +237,31 @@ class GraphWorker(QThread):
             self.error.emit(f"执行过程中发生异常: {exc}")
 
     # ── 内部 ──────────────────────────────────────────────────────────
-    def _collect_inputs(self, node: NodeInstance) -> dict[str, NodeValue]:
-        result: dict[str, NodeValue] = {}
+    def _collect_inputs(self, node: NodeInstance):
+        """收集节点输入。
+
+        - 普通端口 (multi=False)：``port.name → NodeValue``
+        - 多输入端口 (multi=True)：``port.name → list[NodeValue]``，顺序与
+          ``self.graph.connections`` 的迭代顺序一致（即建立连接的顺序）
+        未连接的端口不出现在结果里。
+        """
+        result: dict = {}
         nd = node.definition
         if nd is None:
             return result
         for port in nd.inputs:
-            # 找到连到本端口的上游
+            matches: list[NodeValue] = []
             for conn in self.graph.connections.values():
                 if conn.dst_iid == node.iid and conn.dst_port == port.name:
                     src_outs = self._results.get(conn.src_iid, {})
                     val = src_outs.get(conn.src_port)
                     if val is not None:
-                        result[port.name] = val
-                    break
+                        matches.append(val)
+                    if not port.multi:
+                        break
+            if not matches:
+                continue
+            result[port.name] = matches if port.multi else matches[0]
         return result
 
 
@@ -970,3 +981,467 @@ class RealESRGANExec(NodeExecutor):
         ctx.log(GraphWorker._html(
             f"  · real-esrgan 完成，输出 {out_path}", "#4CAF50"))
         return {"image_out": NodeValue(type="image", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：文本注释（UI only）
+# ══════════════════════════════════════════════════════════════════════
+
+@register("text_note")
+class TextNoteExec(NodeExecutor):
+    """纯 UI 注释节点 执行时空跑 仅为了避免 GraphWorker 输出
+    "无 executor 实现" 的误导日志。"""
+
+    def execute(self, ctx, inputs, params):
+        ctx.log(GraphWorker._html("  · 注释 无操作", "#888888"))
+        return {}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  通用工具：ffmpeg 路径 + 可取消的 subprocess 执行
+# ══════════════════════════════════════════════════════════════════════
+
+def _ffmpeg_exe() -> str:
+    """优先用 ``resource/ffmepg/bin/ffmpeg.exe`` 找不到时退回 PATH。"""
+    import shutil
+    from utils.atool import resource_path
+
+    bundled = resource_path("resource/ffmepg/bin/ffmpeg.exe")
+    if os.path.isfile(bundled):
+        return bundled
+    found = shutil.which("ffmpeg")
+    return found or "ffmpeg"
+
+
+def _run_cmd_with_cancel(cmd: list[str], ctx) -> tuple[int, str]:
+    """执行外部命令 实时把每行 stdout(已合并 stderr) 推到 ctx.log。
+
+    Returns:
+        (returncode, tail) —— tail 是最后 ≤20 行用于错误诊断
+        取消时返回 (-1, tail)
+    """
+    import subprocess
+    from collections import deque
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+    )
+    tail: deque[str] = deque(maxlen=20)
+    try:
+        for line in iter(proc.stdout.readline, ""):
+            if ctx.cancelled:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                return -1, "\n".join(tail)
+            line = line.rstrip()
+            if not line:
+                continue
+            tail.append(line)
+            ctx.log(GraphWorker._html(f"    {line}", "#888888"))
+        proc.wait()
+        return proc.returncode, "\n".join(tail)
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：格式转换
+# ══════════════════════════════════════════════════════════════════════
+
+_AUDIO_FORMATS = {"wav", "mp3", "flac", "ogg", "m4a", "aac"}
+_IMAGE_FORMATS = {"png", "jpg", "jpeg", "webp", "bmp", "tiff"}
+_VIDEO_FORMATS = {"mp4", "mov", "mkv", "avi", "webm"}
+
+
+# 合理的跨类转换 video 同时含音轨与帧序列 可以抽出来
+# 其它如 audio→image (波形图)、image→audio、image→video 需要专门工具 这里拒绝
+_OK_CROSS_CAT = {("video", "audio"), ("video", "image")}
+
+
+@register("format_convert")
+class FormatConvertExec(NodeExecutor):
+    """按 target_format 分发：纯图像转码走 PIL 其余走 ffmpeg。
+
+    会在执行前做类型兼容检查；不合理的跨类（audio↔image 等）会给出明确
+    错误信息 而不是让 PIL/ffmpeg 自己抛出语义不明的底层异常。
+    """
+
+    def execute(self, ctx, inputs, params):
+        src = inputs.get("file_in")
+        if src is None or not src.path:
+            ctx.log(GraphWorker._html(
+                "  · 未接入文件 跳过格式转换", "#FF9800"))
+            return {}
+
+        target_fmt = (params.get("target_format") or "").strip().lower()
+        if not target_fmt:
+            raise RuntimeError("format_convert 未指定 target_format")
+
+        # 目标类型分类
+        if target_fmt in _IMAGE_FORMATS:
+            target_cat = "image"
+        elif target_fmt in _AUDIO_FORMATS:
+            target_cat = "audio"
+        elif target_fmt in _VIDEO_FORMATS:
+            target_cat = "video"
+        else:
+            raise RuntimeError(f"未知 target_format: {target_fmt}")
+
+        # 类型兼容检查 —— 仅在源类型明确属于三大媒体类时检查
+        # src.type == "file"/"text"/"any" 时放行 让底层工具自己判定
+        src_cat = src.type
+        if src_cat in ("audio", "image", "video"):
+            if src_cat != target_cat and (src_cat, target_cat) not in _OK_CROSS_CAT:
+                raise RuntimeError(
+                    f"无法将 {src_cat} 文件 ({os.path.basename(src.path)}) "
+                    f"转换为 {target_cat} 格式 (.{target_fmt})。"
+                    f"video 可以抽出 audio/image 流 其它跨类组合需要专门节点"
+                )
+
+        output_dir = os.path.abspath("./output/_format_convert")
+        os.makedirs(output_dir, exist_ok=True)
+        stem = os.path.splitext(os.path.basename(src.path))[0]
+        out_path = os.path.join(output_dir, f"{stem}.{target_fmt}")
+
+        # 分发：仅在 image→image 时用 PIL，video→image / 任何音视频走 ffmpeg
+        use_pil = (src_cat == "image" and target_cat == "image")
+
+        if use_pil:
+            from PIL import Image
+            with Image.open(src.path) as im:
+                save_im = im
+                # jpg 不支持透明通道 掉个 alpha 避免 Pillow 报错
+                if target_fmt in ("jpg", "jpeg") and im.mode in ("RGBA", "P", "LA"):
+                    save_im = im.convert("RGB")
+                save_im.save(out_path)
+        else:
+            extra: list[str] = []
+            if target_cat == "image":
+                # video→image 只抽一帧 否则 ffmpeg 会按图片序列覆盖写
+                extra = ["-frames:v", "1"]
+            cmd = [_ffmpeg_exe(),
+                   "-hide_banner", "-loglevel", "error", "-nostats",
+                   "-y", "-i", src.path, *extra, out_path]
+            ctx.log(GraphWorker._html(
+                f"  · ffmpeg {src_cat} → {target_cat} (.{target_fmt})",
+                "#888888"))
+            rc, tail = _run_cmd_with_cancel(cmd, ctx)
+            if ctx.cancelled:
+                return {}
+            if rc != 0:
+                raise RuntimeError(
+                    f"ffmpeg 退出码 {rc}\n{tail}" if tail else f"ffmpeg 退出码 {rc}")
+
+        if not os.path.isfile(out_path):
+            raise RuntimeError(f"转换后文件不存在: {out_path}")
+
+        ctx.log(GraphWorker._html(f"  · 已转换 → {out_path}", "#4CAF50"))
+        return {"file_out": NodeValue(type=target_cat, path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：批量输入
+# ══════════════════════════════════════════════════════════════════════
+
+@register("batch_input")
+class BatchInputExec(NodeExecutor):
+    """按 ``directory + glob`` 收集文件列表。
+
+    引擎暂时不支持 list-stream 端口；本节点把首个匹配文件作为 path 输出
+    完整列表挂在 ``payload``/``meta["all_paths"]`` 里供将来扩展。下游
+    现行的 single-path executor 会只跑列表里的第一个文件。
+    """
+
+    def execute(self, ctx, inputs, params):
+        import glob
+        directory = (params.get("directory") or "").strip()
+        if not directory:
+            ctx.log(GraphWorker._html("  · 未指定 directory 跳过", "#FF9800"))
+            return {}
+        if not os.path.isdir(directory):
+            raise RuntimeError(f"directory 不是有效目录: {directory}")
+
+        pattern = (params.get("glob") or "*.*").strip() or "*.*"
+        matched = sorted(glob.glob(os.path.join(directory, pattern)))
+        files = [p for p in matched if os.path.isfile(p)]
+
+        ctx.log(GraphWorker._html(
+            f"  · 匹配到 {len(files)} 个文件 (glob={pattern})", "#CCCCCC"))
+        if not files:
+            return {}
+
+        first = files[0]
+        if len(files) > 1:
+            ctx.log(GraphWorker._html(
+                f"  · 当前仅把首项 {os.path.basename(first)} 传给下游 "
+                f"(完整列表见 payload 共 {len(files)} 项)", "#FF9800"))
+        return {
+            "files_out": NodeValue(
+                type=_infer_type_from_ext(first),
+                path=first,
+                payload=files,
+                meta={"count": len(files), "all_paths": files},
+            )
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：图像缩放
+# ══════════════════════════════════════════════════════════════════════
+
+@register("image_resize")
+class ImageResizeExec(NodeExecutor):
+    """PIL Lanczos 缩放 ``keep_ratio`` 时按 (width, height) 装箱等比缩放。"""
+
+    def execute(self, ctx, inputs, params):
+        from PIL import Image
+
+        src = inputs.get("image_in")
+        if src is None or not src.path:
+            raise RuntimeError("image_resize 缺少图像输入 (image_in 未连接)")
+
+        target_w = int(params.get("width", 1920) or 1920)
+        target_h = int(params.get("height", 1080) or 1080)
+        if target_w <= 0 or target_h <= 0:
+            raise RuntimeError(f"非法宽高: {target_w}x{target_h}")
+        keep_ratio = bool(params.get("keep_ratio", True))
+
+        output_dir = os.path.abspath("./output/_image_resize")
+        os.makedirs(output_dir, exist_ok=True)
+        ext = os.path.splitext(src.path)[1] or ".png"
+        stem = os.path.splitext(os.path.basename(src.path))[0]
+        out_path = os.path.join(output_dir, f"{stem}_resized{ext}")
+
+        with Image.open(src.path) as im:
+            orig_w, orig_h = im.size
+            if keep_ratio:
+                # 装箱：等比缩放到 (target_w, target_h) 之内
+                ratio = min(target_w / orig_w, target_h / orig_h)
+                new_w = max(1, int(orig_w * ratio))
+                new_h = max(1, int(orig_h * ratio))
+            else:
+                new_w, new_h = target_w, target_h
+            resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            save_im = resized
+            if ext.lower() in (".jpg", ".jpeg") and resized.mode in ("RGBA", "P", "LA"):
+                save_im = resized.convert("RGB")
+            save_im.save(out_path)
+
+        ctx.log(GraphWorker._html(
+            f"  · {orig_w}x{orig_h} → {new_w}x{new_h} → {out_path}",
+            "#4CAF50"))
+        return {"image_out": NodeValue(type="image", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：音频合并
+# ══════════════════════════════════════════════════════════════════════
+
+@register("audio_merge")
+class AudioMergeExec(NodeExecutor):
+    """ffmpeg 合并 N 路音频 N 取自 ``audio_in`` 端口的连线数。
+
+    - ``mode=mix``：amix 叠加 ``weights`` 参数控制各路权重 留空则等权
+    - ``mode=concat``：concat 顺序拼接 不读 ``weights``
+    - N=1 时直接 copy 不走 ffmpeg
+    """
+
+    @staticmethod
+    def _parse_weights(raw: str, n: int) -> list[float]:
+        """解析 "1.0, 0.5, 0.3" 之类的权重串 不足按 1.0 补齐 超出截断。"""
+        weights: list[float] = []
+        for tok in (raw or "").replace(",", " ").split():
+            try:
+                weights.append(float(tok))
+            except ValueError:
+                pass
+        while len(weights) < n:
+            weights.append(1.0)
+        return weights[:n]
+
+    def execute(self, ctx, inputs, params):
+        srcs = inputs.get("audio_in") or []
+        # 兼容 引擎可能在某些路径下仍返回单一 NodeValue 而非 list
+        if not isinstance(srcs, list):
+            srcs = [srcs]
+        srcs = [v for v in srcs if v is not None and v.path]
+        if not srcs:
+            raise RuntimeError(
+                "audio_merge 没有任何已连接的音频输入 (audio_in 端口)")
+
+        mode = str(params.get("mode", "mix")).strip().lower()
+        if mode not in ("mix", "concat"):
+            mode = "mix"
+
+        output_dir = os.path.abspath("./output/_audio_merge")
+        os.makedirs(output_dir, exist_ok=True)
+        out_path = os.path.join(
+            output_dir, f"merged_{mode}_{uuid.uuid4().hex[:8]}.wav")
+
+        # 单输入 直接落盘 不走 ffmpeg (无 mix/concat 可言)
+        if len(srcs) == 1:
+            shutil.copy2(srcs[0].path, out_path)
+            ctx.log(GraphWorker._html(
+                f"  · 仅 1 路音频 直接复制 → {out_path}", "#FF9800"))
+            return {"merged": NodeValue(type="audio", path=out_path)}
+
+        n = len(srcs)
+        cmd_inputs: list[str] = []
+        for v in srcs:
+            cmd_inputs += ["-i", v.path]
+
+        joined = "".join(f"[{i}:a]" for i in range(n))
+        if mode == "mix":
+            weights = self._parse_weights(params.get("weights", ""), n)
+            # amix 自带 weights 参数 | 分隔 normalize=0 让权重显式生效
+            weights_str = "|".join(f"{w:.4f}" for w in weights)
+            filter_complex = (
+                f"{joined}amix=inputs={n}:duration=longest"
+                f":normalize=0:weights={weights_str}[out]"
+            )
+            log_extra = f"weights={weights}"
+        else:  # concat
+            # 各路采样率/通道不一致时 ffmpeg 自己会报错
+            filter_complex = f"{joined}concat=n={n}:v=0:a=1[out]"
+            log_extra = ""
+
+        cmd = [_ffmpeg_exe(),
+               "-hide_banner", "-loglevel", "error", "-nostats",
+               "-y", *cmd_inputs,
+               "-filter_complex", filter_complex,
+               "-map", "[out]", out_path]
+
+        ctx.log(GraphWorker._html(
+            f"  · ffmpeg {mode} {n} 路 {log_extra}".rstrip(), "#888888"))
+        rc, tail = _run_cmd_with_cancel(cmd, ctx)
+        if ctx.cancelled:
+            return {}
+        if rc != 0:
+            raise RuntimeError(
+                f"ffmpeg 合并退出码 {rc}\n{tail}" if tail else f"ffmpeg 合并退出码 {rc}")
+        if not os.path.isfile(out_path):
+            raise RuntimeError(f"合并输出不存在: {out_path}")
+
+        ctx.log(GraphWorker._html(f"  · 已合并 → {out_path}", "#4CAF50"))
+        return {"merged": NodeValue(type="audio", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：RVC 变声/翻唱
+# ══════════════════════════════════════════════════════════════════════
+
+@register("rvc")
+class RVCExec(NodeExecutor):
+    """调用现有 ``RVCInferWorker`` 执行单文件变声。
+
+    输入端口（优先于同名参数）:
+        audio_in   (audio)  待变声的源音频
+        model_path (file)   RVC .pth 模型路径
+        index_path (file)   检索 .index 路径（可空）
+    输出端口:
+        audio_out  (audio)  变声后的音频
+    """
+
+    @staticmethod
+    def _resolve_path(inputs: dict, port: str,
+                      params: dict, key: str) -> str:
+        """文件类输入：端口优先 参数兜底。"""
+        v = inputs.get(port)
+        if v is not None and v.path:
+            return v.path
+        return (params.get(key) or "").strip()
+
+    def execute(self, ctx, inputs, params):
+        from workers.rvc_worker import RVCInferWorker
+
+        audio_in = inputs.get("audio_in")
+        if audio_in is None or not audio_in.path:
+            raise RuntimeError("rvc 缺少音频输入 (audio_in 未连接)")
+
+        model_path = self._resolve_path(
+            inputs, "model_path", params, "model_path")
+        if not model_path:
+            raise RuntimeError(
+                "rvc 缺少模型路径 (model_path 端口未连接且参数也未填)")
+        if not os.path.isfile(model_path):
+            raise RuntimeError(f"rvc 模型文件不存在: {model_path}")
+
+        index_path = self._resolve_path(
+            inputs, "index_path", params, "index_path")
+        # index_path 可空 worker 内部自行处理
+
+        output_dir = os.path.abspath("./output/_rvc")
+        os.makedirs(output_dir, exist_ok=True)
+
+        fmt = str(params.get("format", "wav")).lower()
+        if fmt not in ("wav", "flac", "mp3"):
+            fmt = "wav"
+
+        # rvc_worker 期望 device "cuda:0" / "cpu" 直接透传 cuda_drivers 的 value
+        worker_params = {
+            "input":         audio_in.path,
+            "output":        output_dir,
+            "model_path":    model_path,
+            "index_path":    index_path,
+            "device":        params.get("device", "cuda:0"),
+            "f0_method":     params.get("f0_method", "rmvpe+"),
+            "transpose":     int(params.get("transpose", 0) or 0),
+            "index_rate":    float(params.get("index_rate", 0.75) or 0.75),
+            "filter_radius": int(params.get("filter_radius", 3) or 3),
+            "resample_sr":   int(params.get("resample_sr", 0) or 0),
+            "rms_mix_rate":  float(params.get("rms_mix_rate", 0.25) or 0.25),
+            "protect":       float(params.get("protect", 0.33) or 0.33),
+            "split_infer":   bool(params.get("split_infer", False)),
+            "format":        fmt,
+        }
+
+        worker = RVCInferWorker(worker_params)
+
+        def _fwd_output(line: str):
+            ctx.log(line)
+
+        def _fwd_progress(percent: int, status: str):
+            ctx.sub_progress(percent, status)
+
+        result_dir, err = run_qthread_blocking(
+            worker,
+            on_output=_fwd_output,
+            on_progress=_fwd_progress,
+            on_cancelled=lambda: ctx.cancelled,
+        )
+        if ctx.cancelled:
+            return {}
+        if err:
+            raise RuntimeError(err)
+        if not result_dir or not os.path.isdir(result_dir):
+            raise RuntimeError(f"rvc 输出目录无效: {result_dir}")
+
+        # rvc_worker 命名规则: {stem}_rvc.{fmt}
+        stem = os.path.splitext(os.path.basename(audio_in.path))[0]
+        out_path = os.path.join(result_dir, f"{stem}_rvc.{fmt}")
+        if not os.path.isfile(out_path):
+            # 回退：扫一下目录里最新的 .fmt 文件
+            candidates = [os.path.join(result_dir, f)
+                          for f in os.listdir(result_dir)
+                          if f.lower().endswith(f".{fmt}")]
+            if not candidates:
+                raise RuntimeError(
+                    f"rvc 输出文件不存在: {out_path} "
+                    f"(目录 {result_dir} 内无 .{fmt})")
+            candidates.sort(key=os.path.getmtime, reverse=True)
+            out_path = candidates[0]
+
+        ctx.log(GraphWorker._html(
+            f"  · rvc 完成，输出 {out_path}", "#4CAF50"))
+        return {"audio_out": NodeValue(type="audio", path=out_path)}

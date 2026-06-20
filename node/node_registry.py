@@ -272,17 +272,22 @@ _reg(NodeDef(
     id="rvc",
     title="RVC 变声/翻唱",
     category="音频",
+    # 跟 gptsovits 同样的设计：所有"用户原本要选/填的文件"都做成端口
+    # 上游可以用 file_input 喂模型 / 索引 端口没接时回退到同名 params
     inputs=[
-        PortDef("audio_in", "音频输入", "audio"),
+        PortDef("audio_in",   "音频输入",        "audio"),
+        PortDef("model_path", "RVC 模型 (.pth)", "file"),
+        PortDef("index_path", "检索索引 (.index)", "file"),
     ],
     outputs=[
         PortDef("audio_out", "变声输出", "audio"),
     ],
     params={
+        # 兜底：端口未接时从这里取
         "model_path":    "",
         "index_path":    "",
         "device":        "cpu",
-        "f0_method":     "rmvpe+",
+        "f0_method":     "rmvpe",
         "transpose":     0,
         "index_rate":    0.75,
         "filter_radius": 3,
@@ -293,7 +298,13 @@ _reg(NodeDef(
         "format":        "wav",
     },
     param_choices={
-        "f0_method": ["rmvpe", "rmvpe+", "crepe", "pm", "harvest"],
+        # Applio 3.6+ 的合法值（旧版的 rmvpe+/pm/harvest 已被移除
+        # 老存档里若是这几个,会被 _rvc_runner._normalize_f0 自动映射成 rmvpe）
+        "f0_method": [
+            "rmvpe", "crepe", "crepe-tiny", "fcpe",
+            "hybrid[crepe+rmvpe]", "hybrid[crepe+fcpe]",
+            "hybrid[rmvpe+fcpe]", "hybrid[crepe+rmvpe+fcpe]",
+        ],
         "format":    ["wav", "mp3", "flac"],
     },
 ))
@@ -372,14 +383,24 @@ _reg(NodeDef(
     id="audio_merge",
     title="音频合并",
     category="音频",
+    # 单一 multi-input 端口 想合几路就连几根线
+    # 引擎里 (node_worker._collect_inputs) 对 multi=True 端口会把所有
+    # 连进来的 NodeValue 收成 list 顺序按连线建立顺序
     inputs=[
-        PortDef("audio_a", "音频 A", "audio"),
-        PortDef("audio_b", "音频 B", "audio"),
+        PortDef("audio_in", "音频输入", "audio", multi=True),
     ],
     outputs=[
         PortDef("merged", "合并输出", "audio"),
     ],
-    params={"mode": "mix", "volume_a": 1.0, "volume_b": 1.0},
+    params={
+        "mode":    "mix",
+        # 仅 mix 模式生效 留空 = 各路等权
+        # 逗号或空格分隔的浮点数 例 "1.0, 0.5, 0.3" 长度不足按 1.0 补齐 多余截断
+        "weights": "",
+    },
+    param_choices={
+        "mode": ["mix", "concat"],
+    },
 ))
 
 # _reg(NodeDef(

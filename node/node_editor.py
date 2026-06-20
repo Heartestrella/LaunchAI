@@ -45,10 +45,97 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 用户配置里记录"上次打开的 .node 文件"
 from utils.configer import get_field, set_field
 _LAST_FILE_KEY = "node_editor.last_file"
+# 整个 tab 会话快照（含未保存的图）—— 重启后还原所有打开的 tab
+_SESSION_KEY = "node_editor.session"
 _NODE_FILE_FILTER = "节点图 (*.node *.json);;所有文件 (*)"
+_UNSAVED_SUFFIX = " (unsaved)"
 
 
 ACCENT = "#0078D4"
+
+# 参数键 → 中文释义 用于属性面板的字段标签 显示成 "english · 中文"
+# 没列出的键退回展示原英文键 不强求每个新参数都翻译
+_PARAM_LABELS_CN = {
+    # ── 通用 / 基础 ────────────────────────────────────────────────
+    "path":            "文件路径",
+    "file":            "文件",
+    "filepath":        "文件路径",
+    "filename":        "文件名",
+    "input":           "输入",
+    "directory":       "输出目录",
+    "dir":             "目录",
+    "folder":          "目录",
+    "out_dir":         "输出目录",
+    "output_dir":      "输出目录",
+    "audio_dir":       "音频根目录",
+    "glob":            "通配符",
+    "text":            "文本内容",
+    "target_format":   "目标格式",
+    "device":          "计算设备",
+    "gpu":             "GPU",
+    "gpu_id":          "GPU 编号",
+    "model":           "模型",
+    "format":          "输出格式",
+    "fmt":             "输出格式",
+    # ── demucs ──────────────────────────────────────────────────
+    "shifts":          "随机偏移次数",
+    "overlap":         "段重叠率",
+    "segment":         "切片长度 (秒)",
+    # ── whisper ─────────────────────────────────────────────────
+    "language":        "语种",
+    "task":            "任务 (转录/翻译)",
+    # ── RVC ─────────────────────────────────────────────────────
+    "model_path":      "模型路径 (.pth)",
+    "index_path":      "检索索引 (.index)",
+    "f0_method":       "音高提取算法",
+    "transpose":       "变调 (半音)",
+    "index_rate":      "检索特征占比",
+    "filter_radius":   "中值滤波半径",
+    "resample_sr":     "重采样率",
+    "rms_mix_rate":    "音量包络融合",
+    "protect":         "清辅音保护",
+    "split_infer":     "按静音分段推理",
+    # ── sovits .list ────────────────────────────────────────────
+    "list_path":       ".list 数据集路径",
+    "entry_index":     "条目索引 (-1 = 首项)",
+    # ── GPT-SoVITS ──────────────────────────────────────────────
+    "gpt_model":       "GPT 模型 (.ckpt)",
+    "sovits_model":    "SoVITS 模型 (.pth)",
+    "ref_audio":       "参考音频",
+    "ref_text":        "参考文本",
+    "target_text":     "目标文本",
+    "ref_language":    "参考语种",
+    "target_language": "目标语种",
+    "how_to_cut":      "切分策略",
+    "top_k":           "Top-K 采样",
+    "top_p":           "Top-P 采样",
+    "temperature":     "温度",
+    "speed":           "语速",
+    # ── audio_merge ─────────────────────────────────────────────
+    "mode":            "合并模式",
+    "weights":         "各路权重",
+    "volume_a":        "音量 A",
+    "volume_b":        "音量 B",
+    # ── Real-ESRGAN ─────────────────────────────────────────────
+    "scale":           "放大倍数",
+    "tile":            "切片大小",
+    # ── image_resize ────────────────────────────────────────────
+    "width":           "宽度",
+    "height":          "高度",
+    "keep_ratio":      "保持宽高比",
+    # ── text_note / text_input ─────────────────────────────────
+    "note":            "备注",
+    "description":     "描述",
+    "prompt":          "提示词",
+}
+
+
+def _param_display_label(key: str) -> str:
+    """属性面板字段名：``english · 中文`` 没翻译的键就显示原英文。"""
+    cn = _PARAM_LABELS_CN.get(key)
+    return f"{key} · {cn}" if cn else key
+
+
 _FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
 _DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
 _DEVICE_PARAM_KEYS = {"device", "gpu", "gpu_id"}
@@ -432,7 +519,7 @@ class PropertyPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
 
-        name = CaptionLabel(key, row)
+        name = CaptionLabel(_param_display_label(key), row)
         name.setStyleSheet("color:rgba(255,255,255,0.65);")
         lay.addWidget(name)
 
@@ -675,16 +762,19 @@ class _Doc:
     """一个 tab 对应一份独立的节点图会话。"""
 
     __slots__ = ("route_key", "graph", "canvas",
-                 "current_file", "runner", "title")
+                 "current_file", "runner", "title", "dirty")
 
     def __init__(self, route_key: str, graph: NodeGraph, canvas,
-                 title: str, current_file: str | None = None):
+                 title: str, current_file: str | None = None,
+                 dirty: bool = False):
         self.route_key = route_key
         self.graph = graph
         self.canvas = canvas
         self.current_file = current_file
         self.runner: GraphWorker | None = None
         self.title = title
+        # 与磁盘上的 current_file 是否有差异；无文件且非空也算 dirty
+        self.dirty = dirty
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -705,8 +795,14 @@ class NodeEditorPage(QWidget):
         self._doc_seq = 0            # 用于生成唯一 routeKey + "未命名 N" 标题
         # 切 tab 时短暂屏蔽 currentChanged 反复触发
         self._switching_tab = False
+        # 加载 session / 文件期间不要把程序化的图变更标记为 dirty
+        self._loading = False
 
         self._build_ui()
+        # session 持久化：所有变更都 debounce 500ms 后写入配置
+        self._save_session_timer = QTimer(self)
+        self._save_session_timer.setSingleShot(True)
+        self._save_session_timer.timeout.connect(self._save_session)
         # 启动加载策略：用户配置里有"上次打开的文件"就读；读不到才回退到 demo
         self._auto_load_on_start()
 
@@ -778,7 +874,9 @@ class NodeEditorPage(QWidget):
         tb_lay.addStretch()
 
         hint = QLabel(
-            "Shift+A 添加节点  ·  右键删除连线  ·  Delete 删除节点  ·  滚轮缩放  ·  中键平移", toolbar)
+            "Shift+A 添加  ·  Shift+D 复制  ·  X/Del 删除  ·  "
+            "Ctrl/Shift+点击 多选  ·  Ctrl+A 全选  ·  右键删除连线  ·  "
+            "滚轮缩放  ·  中键平移", toolbar)
         hint.setStyleSheet("color:rgba(150,150,150,140);font-size:11px;")
         tb_lay.addWidget(hint)
         tb_lay.addStretch()
@@ -836,6 +934,8 @@ class NodeEditorPage(QWidget):
         self._tabbar.tabCloseRequested.connect(self._close_tab)
         self._tabbar.currentChanged.connect(self._on_tab_changed)
         self._tabbar.tabBarDoubleClicked.connect(self._begin_rename_tab)
+        # 拖动 tab 重排时同步 _docs 顺序，否则 session 持久化的顺序会错位
+        self._tabbar.tabMoved.connect(self._on_tab_moved)
         root.addWidget(self._tabbar)
 
         # ── 主体：画布栈 + 右侧属性面板 ──────────────────────────────
@@ -914,6 +1014,7 @@ class NodeEditorPage(QWidget):
         self._tabbar.setCurrentIndex(idx)
         # TabBar.setCurrentIndex 不发 currentChanged,得手动切画布栈
         self._on_tab_changed(idx)
+        self._schedule_session_save()
 
     def _next_untitled_name(self) -> str:
         used = {d.title for d in self._docs}
@@ -945,6 +1046,7 @@ class NodeEditorPage(QWidget):
         else:
             # TabBar.removeTab 会自动调整 currentIndex,这里同步一下显示
             self._on_tab_changed(self._tabbar.currentIndex())
+        self._schedule_session_save()
 
     def _on_tab_changed(self, index: int):
         if self._switching_tab:
@@ -958,8 +1060,52 @@ class NodeEditorPage(QWidget):
 
     def _set_doc_title(self, doc: _Doc, title: str):
         doc.title = title
+        self._refresh_tab_text(doc)
+
+    def _refresh_tab_text(self, doc: _Doc):
+        """根据 doc.title 与 doc.dirty 刷新 tab 上显示的文本。"""
+        if doc not in self._docs:
+            return
         idx = self._docs.index(doc)
-        self._tabbar.tabItem(idx).setText(title)
+        display = doc.title + _UNSAVED_SUFFIX if doc.dirty else doc.title
+        self._tabbar.tabItem(idx).setText(display)
+
+    def _mark_dirty(self, doc: _Doc | None = None):
+        """把 doc 标为未保存；session 加载期间忽略，避免误标。"""
+        if self._loading:
+            return
+        doc = doc or self._active
+        if doc is None:
+            return
+        if not doc.dirty:
+            doc.dirty = True
+            self._refresh_tab_text(doc)
+        self._schedule_session_save()
+
+    def _mark_clean(self, doc: _Doc | None = None):
+        doc = doc or self._active
+        if doc is None:
+            return
+        if doc.dirty:
+            doc.dirty = False
+            self._refresh_tab_text(doc)
+        self._schedule_session_save()
+
+    def _schedule_session_save(self):
+        if self._loading:
+            return
+        timer = getattr(self, "_save_session_timer", None)
+        if timer is not None:
+            timer.start(500)
+
+    def _on_tab_moved(self, src: int, dst: int):
+        if not (0 <= src < len(self._docs)) or not (0 <= dst < len(self._docs)):
+            return
+        if src == dst:
+            return
+        doc = self._docs.pop(src)
+        self._docs.insert(dst, doc)
+        self._schedule_session_save()
 
     def _begin_rename_tab(self, index: int):
         """双击 tab 触发的内联重命名。
@@ -1006,6 +1152,7 @@ class NodeEditorPage(QWidget):
         if not new_title or new_title == doc.title or doc not in self._docs:
             return
         self._set_doc_title(doc, new_title)
+        self._schedule_session_save()
 
     def _refresh_run_button(self):
         running = self._runner is not None and self._runner.isRunning()
@@ -1051,6 +1198,7 @@ class NodeEditorPage(QWidget):
         self._spawn_pos_offset = (self._spawn_pos_offset + 1) % 10
         node = self.graph.add_node(def_id, cx - 100 + offset, cy - 60 + offset)
         self._canvas.update()
+        self._mark_dirty()
         InfoBar.success(
             title="已添加", content=f"{node.title}",
             parent=self, position=InfoBarPosition.BOTTOM_RIGHT, duration=1500
@@ -1063,6 +1211,9 @@ class NodeEditorPage(QWidget):
         if node.def_id == "preview":
             path = self._canvas.resolve_preview_path(node)
             self._canvas.update_preview(iid, path)
+        elif node.def_id in ("text_note", "text_input"):
+            # 文本变化要重画节点 高度可能跟着折行变
+            self._canvas.update()
         else:
             for conn in self.graph.connections.values():
                 if conn.src_iid == iid:
@@ -1070,6 +1221,7 @@ class NodeEditorPage(QWidget):
                     if dst and dst.def_id == "preview":
                         path = self._canvas.resolve_preview_path(dst)
                         self._canvas.update_preview(dst.iid, path)
+        self._mark_dirty()
 
     def _on_node_selected(self, iid: str):
         self._prop_panel.show_node(iid)
@@ -1079,6 +1231,7 @@ class NodeEditorPage(QWidget):
 
     def _on_graph_changed(self):
         self._canvas.refresh_all_previews()
+        self._mark_dirty()
 
     def _on_run_btn_click(self):
         """按钮在执行/终止两态间切换。"""
@@ -1220,11 +1373,18 @@ class NodeEditorPage(QWidget):
             self.graph.remove_node(iid)
         self._prop_panel.clear_selection()
         self._canvas.update()
+        self._mark_dirty()
 
     # ── 文件 IO ──────────────────────────────────────────────────────
 
     def _auto_load_on_start(self):
-        """启动时先建一个空白 tab,再尝试按 last_file 加载；失败回退到 demo 节点。"""
+        """启动时优先还原完整 session（所有 tab + 未保存的图）。
+
+        优先级：session → last_file → demo 节点。
+        """
+        if self._restore_session():
+            return
+
         # 始终至少有一个 tab
         self._create_doc(self._next_untitled_name())
         self._tabbar.setCurrentIndex(0)
@@ -1240,6 +1400,86 @@ class NodeEditorPage(QWidget):
         # 没有上次记录或加载失败 —— 保留旧的 demo 行为兜底
         self._add_demo_nodes()
 
+    def _restore_session(self) -> bool:
+        """从配置里恢复所有 tab；返回 True 表示已成功还原至少一个 tab。"""
+        sess = get_field(_SESSION_KEY)
+        if not isinstance(sess, dict):
+            return False
+        tabs = sess.get("tabs")
+        if not isinstance(tabs, list) or not tabs:
+            return False
+
+        self._loading = True
+        try:
+            restored = 0
+            for entry in tabs:
+                if not isinstance(entry, dict):
+                    continue
+                title = entry.get("title") or self._next_untitled_name()
+                current_file = entry.get("current_file")
+                if current_file is not None and not isinstance(current_file, str):
+                    current_file = None
+                graph_data = entry.get("graph")
+                dirty = bool(entry.get("dirty", False))
+
+                doc = self._create_doc(title, current_file)
+                if isinstance(graph_data, dict):
+                    try:
+                        doc.graph.load_from_dict(graph_data)
+                    except Exception as e:
+                        warning(f"还原 tab '{title}' 的节点图失败: {e}")
+                # 文件丢失：保持 graph 不动；标 dirty 提示用户另存
+                if current_file and not os.path.isfile(current_file):
+                    dirty = True
+                doc.dirty = dirty
+                self._refresh_tab_text(doc)
+                restored += 1
+
+            if restored == 0:
+                return False
+
+            cur = sess.get("current_index", 0)
+            if not isinstance(cur, int) or not (0 <= cur < len(self._docs)):
+                cur = 0
+            self._tabbar.setCurrentIndex(cur)
+            self._on_tab_changed(cur)
+
+            # 还原后让 canvas 各自适应视图 + 渲染预览
+            for doc in self._docs:
+                doc.canvas.refresh_all_previews()
+            active = self._active
+            if active is not None:
+                QTimer.singleShot(100, active.canvas.fit_view)
+            return True
+        finally:
+            self._loading = False
+
+    def _save_session(self):
+        """把当前所有 tab 的快照写入配置（含未保存的图）。"""
+        if self._loading:
+            return
+        tabs = []
+        for doc in self._docs:
+            try:
+                graph_data = doc.graph.to_dict()
+            except Exception as e:
+                warning(f"序列化 tab '{doc.title}' 节点图失败: {e}")
+                graph_data = None
+            tabs.append({
+                "title": doc.title,
+                "current_file": doc.current_file,
+                "dirty": bool(doc.dirty),
+                "graph": graph_data,
+            })
+        try:
+            cur = self._tabbar.currentIndex()
+        except Exception:
+            cur = 0
+        set_field(_SESSION_KEY, {
+            "tabs": tabs,
+            "current_index": cur,
+        })
+
     def _load_from_path(self, path: str):
         """加载 .node 文件。若活动 doc 是空白未保存,就地加载；否则新开 tab。"""
         doc = self._active
@@ -1251,18 +1491,24 @@ class NodeEditorPage(QWidget):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # 清掉现有状态（含 canvas 预览），再加载
-        doc.canvas.clear_all_previews()
-        doc.graph.load_from_dict(data)
-        self._prop_panel.set_graph(doc.graph)
-        doc.canvas.update()
-        doc.canvas.refresh_all_previews()
-        QTimer.singleShot(100, doc.canvas.fit_view)
+        # 清掉现有状态（含 canvas 预览），再加载；期间屏蔽 dirty 标记
+        self._loading = True
+        try:
+            doc.canvas.clear_all_previews()
+            doc.graph.load_from_dict(data)
+            self._prop_panel.set_graph(doc.graph)
+            doc.canvas.update()
+            doc.canvas.refresh_all_previews()
+            QTimer.singleShot(100, doc.canvas.fit_view)
 
-        doc.current_file = path
-        self._set_doc_title(doc, os.path.basename(path))
+            doc.current_file = path
+            doc.dirty = False
+            self._set_doc_title(doc, os.path.basename(path))
+        finally:
+            self._loading = False
         set_field(_LAST_FILE_KEY, path)
         info(f"已加载节点文件: {path}")
+        self._schedule_session_save()
 
     def _open_file(self):
         # 默认目录：当前文件所在目录 → 上次文件所在目录 → cwd
@@ -1344,6 +1590,7 @@ class NodeEditorPage(QWidget):
         doc = self._active
         if doc:
             doc.current_file = path
+            doc.dirty = False
             self._set_doc_title(doc, os.path.basename(path))
         set_field(_LAST_FILE_KEY, path)
         info(f"节点文件已保存: {path}")
@@ -1354,6 +1601,7 @@ class NodeEditorPage(QWidget):
             position=InfoBarPosition.TOP_RIGHT,
             duration=2000,
         )
+        self._schedule_session_save()
 
 
 # ══════════════════════════════════════════════════════════════════════

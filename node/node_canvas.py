@@ -28,7 +28,9 @@ from PyQt6.QtWidgets import QWidget, QApplication
 
 from node.node_registry import PORT_COLORS, REGISTRY
 from node.node_graph import NodeGraph, NodeInstance, Connection
-from node.node_preview import create_preview, detect_file_type, PREVIEW_W
+from node.node_preview import (
+    create_preview, detect_file_type, PREVIEW_W, _is_binary_file,
+)
 
 # ── 布局常量（对齐 LiteGraph 源码默认值） ─────────────────────────────
 NODE_W = 210
@@ -65,6 +67,14 @@ C_SEPARATOR = QColor(0, 0, 0, 80)
 
 C_CUT_LINE = QColor(255, 80, 80, 220)
 
+# text_note 专属：sticky-note 暖色 与数据节点区分开
+C_NOTE_BODY = QColor(70, 64, 46)
+C_NOTE_HEADER = QColor(60, 56, 42)
+C_NOTE_TEXT = QColor(245, 225, 160)
+NOTE_PAD_X = 10
+NOTE_PAD_Y = 8
+NOTE_MIN_BODY_H = 40
+
 
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
@@ -90,6 +100,10 @@ class NodeCanvas(QWidget):
         self._selected:   set[str] = set()
         self._drag_node:  str | None = None
         self._drag_start: QPointF | None = None
+        # 多选拖拽：记录拖动起点的画布坐标 + 每个被选中节点拖动前的位置
+        # 拖动时所有选中节点按同一 delta 平移
+        self._drag_anchor: QPointF | None = None
+        self._drag_origins: dict[str, tuple[float, float]] = {}
 
         # 连线拖拽
         self._wire_src_iid:  str | None = None
@@ -112,10 +126,15 @@ class NodeCanvas(QWidget):
         self._resize_orig_h: float = 0
 
         # 预览 overlay
+        # 音/视频/图片走 widget overlay；文本类直接缓存内容,在 _draw_node
+        # 里用 QPainter 画 —— 这样字体/缩放与其它节点元素一致。
         self._preview_widgets: dict[str, QWidget] = {}
         self._preview_paths: dict[str, str] = {}
+        self._preview_text: dict[str, str] = {}
 
         self.setMinimumSize(800, 600)
+        # 让画布在被点击后接收键盘事件 否则 X/Shift+D/Ctrl+A 不会到 keyPressEvent
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._set_style()
 
     # ── 样式 ──────────────────────────────────────────────────────────
@@ -132,6 +151,22 @@ class NodeCanvas(QWidget):
     # ── 节点几何 ──────────────────────────────────────────────────────
     def _auto_node_size(self, node: NodeInstance) -> tuple[float, float]:
         nd = node.definition
+        # text_note / text_input：宽度由用户决定 高度根据文本折行自动计算
+        # 区别仅在端口行占位 —— text_input 顶部要留一行给 text_out 端口
+        if node.def_id in ("text_note", "text_input"):
+            w = node.w if node.w > 0 else NODE_W
+            body_w = max(40, w - NOTE_PAD_X * 2)
+            text = str(node.params.get("text", "")) or " "
+            fm = QFontMetrics(QApplication.font())
+            rect = fm.boundingRect(
+                0, 0, int(body_w), 100000,
+                int(Qt.TextFlag.TextWordWrap), text,
+            )
+            text_h = max(NOTE_MIN_BODY_H, rect.height() + NOTE_PAD_Y * 2)
+            # text_input 顶部多一个端口行
+            port_h = PORT_ROW_H if node.def_id == "text_input" else 0
+            return float(w), float(NODE_HEADER + port_h + text_h)
+
         n_ports = max(
             len(nd.inputs) if nd else 0,
             len(nd.outputs) if nd else 0
@@ -145,7 +180,11 @@ class NodeCanvas(QWidget):
     def node_rect(self, node: NodeInstance) -> QRectF:
         aw, ah = self._auto_node_size(node)
         w = node.w if node.w > 0 else aw
-        h = node.h if node.h > 0 else ah
+        if node.def_id in ("text_note", "text_input"):
+            # 高度始终跟随文本 用户改 node.h 不生效（避免文字被裁断）
+            h = ah
+        else:
+            h = node.h if node.h > 0 else ah
         return QRectF(node.x, node.y, w, h)
 
     def port_pos(self, node: NodeInstance, port_name: str, is_output: bool) -> QPointF | None:
@@ -300,11 +339,14 @@ class NodeCanvas(QWidget):
         nd = node.definition
         selected = node.iid in self._selected
         nr = self.node_rect(node)
+        is_note = node.def_id == "text_note"
+        body_color = C_NOTE_BODY if is_note else C_NODE_BODY
+        header_color = C_NOTE_HEADER if is_note else C_NODE_HEADER
 
         # 主体
         body = QPainterPath()
         body.addRoundedRect(nr, CORNER_R, CORNER_R)
-        p.fillPath(body, C_NODE_BODY)
+        p.fillPath(body, body_color)
 
         # 标题栏（统一深灰，无分类色）
         hdr_rect = QRectF(nr.x(), nr.y(), nr.width(), NODE_HEADER)
@@ -315,7 +357,7 @@ class NodeCanvas(QWidget):
                                 hdr_rect.width(),
                                 hdr_rect.height() - CORNER_R))
         hdr_path = hdr_path.simplified().intersected(body)
-        p.fillPath(hdr_path, C_NODE_HEADER)
+        p.fillPath(hdr_path, header_color)
 
         # 标题与内容分隔线
         p.setPen(QPen(C_SEPARATOR, 1))
@@ -332,6 +374,43 @@ class NodeCanvas(QWidget):
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             node.title
         )
+
+        # text_note：把 params["text"] 折行画进 body 区域
+        if is_note:
+            text = str(node.params.get("text", ""))
+            body_rect = QRectF(
+                nr.x() + NOTE_PAD_X,
+                nr.y() + NODE_HEADER + NOTE_PAD_Y,
+                max(0.0, nr.width() - NOTE_PAD_X * 2),
+                max(0.0, nr.height() - NODE_HEADER - NOTE_PAD_Y * 2),
+            )
+            p.setPen(C_NOTE_TEXT)
+            p.drawText(
+                body_rect,
+                int(Qt.AlignmentFlag.AlignTop
+                    | Qt.AlignmentFlag.AlignLeft
+                    | Qt.TextFlag.TextWordWrap),
+                text,
+            )
+
+        # text_input：在 text_out 端口下方画 params["text"]
+        if node.def_id == "text_input":
+            text = str(node.params.get("text", ""))
+            top = nr.y() + NODE_HEADER + PORT_ROW_H + 4
+            body_rect = QRectF(
+                nr.x() + NOTE_PAD_X,
+                top,
+                max(0.0, nr.width() - NOTE_PAD_X * 2),
+                max(0.0, nr.bottom() - top - NOTE_PAD_Y),
+            )
+            p.setPen(C_PORT_TEXT)
+            p.drawText(
+                body_rect,
+                int(Qt.AlignmentFlag.AlignTop
+                    | Qt.AlignmentFlag.AlignLeft
+                    | Qt.TextFlag.TextWordWrap),
+                text,
+            )
 
         # 边框
         if selected:
@@ -369,6 +448,23 @@ class NodeCanvas(QWidget):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
                 port.label
             )
+
+        # preview 节点 + 缓存了文本内容：在画布坐标系里画 (跟随缩放、用系统字体)
+        # 跟 widget overlay 那种"字体不变 盒子在变"的失真表现做切割
+        if node.def_id == "preview" and node.iid in self._preview_text:
+            area = self._preview_area(node)
+            if area.width() > 8 and area.height() > 8:
+                bg_path = QPainterPath()
+                bg_path.addRoundedRect(area, 4, 4)
+                p.fillPath(bg_path, QColor(0x2B, 0x2B, 0x2B))
+                p.setPen(QColor(224, 224, 224))
+                p.drawText(
+                    area.adjusted(6, 4, -6, -4),
+                    int(Qt.AlignmentFlag.AlignTop
+                        | Qt.AlignmentFlag.AlignLeft
+                        | Qt.TextFlag.TextWordWrap),
+                    self._preview_text[node.iid],
+                )
 
         # 右下角缩放手柄
         gx = nr.right() - 2
@@ -527,10 +623,34 @@ class NodeCanvas(QWidget):
 
             iid = self.hit_node(cp)
             if iid:
-                if not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-                    self._selected.clear()
-                self._selected.add(iid)
+                additive = bool(e.modifiers() & (
+                    Qt.KeyboardModifier.ShiftModifier
+                    | Qt.KeyboardModifier.ControlModifier))
+                if additive:
+                    # Ctrl/Shift+click: toggle 当前节点 已选则移出 否则加入
+                    if iid in self._selected:
+                        self._selected.discard(iid)
+                        if self._selected:
+                            self.node_selected.emit(next(iter(self._selected)))
+                        else:
+                            self.node_deselected.emit()
+                        self.update()
+                        return  # 取消选中时不开始拖拽
+                    self._selected.add(iid)
+                else:
+                    # 点到已选节点：保留整组选择 直接进入群组拖拽
+                    # 点到未选节点：清空再选这一个
+                    if iid not in self._selected:
+                        self._selected.clear()
+                        self._selected.add(iid)
+                # 群组拖拽：记录每个被选节点的起始位置
                 self._drag_node = iid
+                self._drag_anchor = cp
+                self._drag_origins = {
+                    sid: (self.graph.nodes[sid].x, self.graph.nodes[sid].y)
+                    for sid in self._selected if sid in self.graph.nodes
+                }
+                # 旧字段保留 兼容仍可能在别处引用 _drag_start 的代码
                 self._drag_start = cp - QPointF(self.graph.nodes[iid].x,
                                                 self.graph.nodes[iid].y)
                 self.node_selected.emit(iid)
@@ -580,9 +700,11 @@ class NodeCanvas(QWidget):
             self.update()
             return
 
-        if self._drag_node and self._drag_start:
-            new_pos = cp - self._drag_start
-            self.graph.move_node(self._drag_node, new_pos.x(), new_pos.y())
+        if self._drag_node and self._drag_anchor is not None and self._drag_origins:
+            # 群组拖拽：所有选中节点按同一 delta 平移
+            delta = cp - self._drag_anchor
+            for sid, (ox, oy) in self._drag_origins.items():
+                self.graph.move_node(sid, ox + delta.x(), oy + delta.y())
             self.update()
             return
 
@@ -621,8 +743,20 @@ class NodeCanvas(QWidget):
 
             self._resize_node = None
             self._resize_start = None
+            # 拖拽真的发生过位置变化才发 graph_changed (避免单击空跑)
+            if self._drag_node and self._drag_anchor is not None:
+                moved = False
+                for sid, (ox, oy) in self._drag_origins.items():
+                    node = self.graph.nodes.get(sid)
+                    if node and (node.x != ox or node.y != oy):
+                        moved = True
+                        break
+                if moved:
+                    self.graph_changed.emit()
             self._drag_node = None
             self._drag_start = None
+            self._drag_anchor = None
+            self._drag_origins = {}
             self.update()
 
         elif e.button() == Qt.MouseButton.RightButton:
@@ -640,14 +774,94 @@ class NodeCanvas(QWidget):
                 self.update()
 
     def keyPressEvent(self, e: QKeyEvent):
-        if e.key() == Qt.Key.Key_Delete:
-            for iid in list(self._selected):
-                self.remove_preview(iid)
-                self.graph.remove_node(iid)
-            self._selected.clear()
-            self.node_deselected.emit()
-            self.graph_changed.emit()
-            self.update()
+        mods = e.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+
+        # Delete / X：删除选中（Blender 风格双绑定）
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_X) and not ctrl:
+            self._delete_selected()
+            return
+
+        # Shift+D：复制选中（节点 + 内部连线 + 全量 params）
+        if e.key() == Qt.Key.Key_D and shift and not ctrl:
+            self._duplicate_selected()
+            return
+
+        # Ctrl+A：全选
+        if e.key() == Qt.Key.Key_A and ctrl and not shift:
+            self._select_all()
+            return
+
+        super().keyPressEvent(e)
+
+    # ── 选中节点的高层操作 ───────────────────────────────────────────
+    def _delete_selected(self):
+        if not self._selected:
+            return
+        for iid in list(self._selected):
+            self.remove_preview(iid)
+            self.graph.remove_node(iid)
+        self._selected.clear()
+        self.node_deselected.emit()
+        self.graph_changed.emit()
+        self.update()
+
+    def _select_all(self):
+        all_iids = set(self.graph.nodes.keys())
+        if not all_iids or all_iids == self._selected:
+            return
+        self._selected = all_iids
+        # 属性面板显示其中一个（用任意一个 焦点节点不再有特殊地位）
+        self.node_selected.emit(next(iter(all_iids)))
+        self.update()
+
+    def _duplicate_selected(self):
+        """Shift+D：复制当前选中的节点。
+
+        - 节点位置整体偏移 +30/+30 与原节点错开 防止重叠
+        - params 深拷贝 (含路径/数值/枚举等所有字段)
+        - 仅复制"两端都在选中集合里"的连线 跨界连线不复制
+        - 复制完后选中集合切到新节点 方便用户立刻继续拖拽
+        """
+        if not self._selected:
+            return
+        import copy
+        OFFSET_X, OFFSET_Y = 30.0, 30.0
+
+        iid_map: dict[str, str] = {}
+        for sid in list(self._selected):
+            orig = self.graph.nodes.get(sid)
+            if orig is None:
+                continue
+            new_node = self.graph.add_node(
+                orig.def_id,
+                orig.x + OFFSET_X,
+                orig.y + OFFSET_Y,
+            )
+            # 保留用户调过的尺寸
+            new_node.w = orig.w
+            new_node.h = orig.h
+            # params 深拷贝（防止以后 params 里出现 list/dict 时共享引用）
+            new_node.params = copy.deepcopy(orig.params)
+            iid_map[sid] = new_node.iid
+
+        if not iid_map:
+            return
+
+        # 复制两端都在选中集合里的连线
+        for conn in list(self.graph.connections.values()):
+            if conn.src_iid in iid_map and conn.dst_iid in iid_map:
+                self.graph.add_connection(
+                    iid_map[conn.src_iid], conn.src_port,
+                    iid_map[conn.dst_iid], conn.dst_port,
+                )
+
+        # 切到新节点
+        self._selected = set(iid_map.values())
+        self.node_selected.emit(next(iter(self._selected)))
+        self.graph_changed.emit()
+        self.update()
 
     def _try_delete_connection(self, cp: QPointF):
         THRESHOLD = 8.0
@@ -712,7 +926,8 @@ class NodeCanvas(QWidget):
             w.setGeometry(int(tl.x()), int(tl.y()), sw, sh)
             w.show()
 
-        stale = set(self._preview_widgets.keys()) - alive
+        stale = (set(self._preview_widgets.keys())
+                 | set(self._preview_text.keys())) - alive
         for iid in stale:
             self.remove_preview(iid)
 
@@ -722,6 +937,27 @@ class NodeCanvas(QWidget):
         self.remove_preview(iid)
         if not path:
             return
+
+        # 文本类预览：直接缓存内容 由 _draw_node 用 QPainter 画
+        # 不走 QTextEdit overlay —— overlay 的字体不随画布缩放,缩放后会模糊
+        ftype = detect_file_type(path)
+        is_text = ftype == "text"
+        if not is_text and ftype == "unknown":
+            try:
+                is_text = not _is_binary_file(path)
+            except Exception:
+                is_text = False
+        if is_text:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read(2048)
+            except Exception:
+                content = "(无法读取)"
+            self._preview_text[iid] = content
+            self._preview_paths[iid] = path
+            self.update()
+            return
+
         w = create_preview(path, self)
         if w is None:
             return
@@ -734,6 +970,7 @@ class NodeCanvas(QWidget):
     def remove_preview(self, iid: str):
         w = self._preview_widgets.pop(iid, None)
         self._preview_paths.pop(iid, None)
+        self._preview_text.pop(iid, None)
         if w is not None:
             if hasattr(w, "cleanup"):
                 w.cleanup()
