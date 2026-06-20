@@ -510,12 +510,64 @@
               }
             ]
           }
+        },
+        {
+          "title": "未命名 1",
+          "current_file": null,
+          "dirty": true,
+          "graph": {
+            "version": 1,
+            "nodes": [
+              {
+                "iid": "5ef263e0",
+                "def_id": "music_fetch",
+                "x": 111.5,
+                "y": 216.0,
+                "w": 0.0,
+                "h": 0.0,
+                "params": {
+                  "keyword": "running in the dark",
+                  "source": "netease",
+                  "drop_instrumental": true,
+                  "selected_keyword": "running in the dark",
+                  "selected_source": "netease",
+                  "selected_id": "2048695715",
+                  "selected_title": "Running In The Dark - Isaak Wolf"
+                }
+              },
+              {
+                "iid": "dcd8aaa8",
+                "def_id": "preview",
+                "x": 554.5,
+                "y": 307.0,
+                "w": 0.0,
+                "h": 0.0,
+                "params": {
+                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data\\outputs\\node\\music_fetch\\Running In The Dark - MONKEY MAJIK, 塞壬唱片-MSR.mp3"
+                }
+              }
+            ],
+            "connections": [
+              {
+                "cid": "0c1868d3",
+                "src_iid": "5ef263e0",
+                "src_port": "audio_out",
+                "dst_iid": "dcd8aaa8",
+                "dst_port": "input"
+              }
+            ]
+          }
         }
       ],
-      "current_index": 0
+      "current_index": 2
     }
   },
   "paths": {
     "root": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data"
+  },
+  "materials": {
+    "disclaimer_accepted": true,
+    "bilibili_cookie": "",
+    "netease_cookie": ""
   }
 }

@@ -1,0 +1,27 @@
+# LaunchAI —— UI / 启动器最小依赖
+# 仅包含主程序壳 (app.py / widgets / node / utils / workers/pip_worker.py) 启动所需依赖
+# AIGC 工具 (torch, demucs, openai-whisper, basicsr, gfpgan, ultralytics, iopaint, RVC, GPT-SoVITS 等)
+# 由 workers/pip_worker.py 在用户点击安装时按需拉取 不写入此文件
+# Python Ver:3.11.9
+
+# ---- Qt GUI 框架 ----
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.1
+PyQt6-Fluent-Widgets==1.11.2
+PyQt6-Frameless-Window==0.8.1
+darkdetect==0.8.0
+
+# ---- 图像 / 数值 (波形、节点预览缩略图、QR 码渲染) ----
+numpy==2.2.6
+pillow==12.2.0
+qrcode==8.2
+
+# ---- 网络 (pip_worker 镜像测速、material_fetcher 素材下载、网易/B站登录) ----
+requests==2.34.2
+urllib3==2.7.0
+
+# ---- Git 克隆 (workers/pip_worker.py 从 GitHub 安装第三方项目) ----
+dulwich==1.2.6
+
+# ---- 网易云 weapi 加密 (utils/_netease_weapi.py 登录用) ----
+pycryptodome==3.23.0

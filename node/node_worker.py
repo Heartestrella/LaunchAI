@@ -1444,3 +1444,112 @@ class RVCExec(NodeExecutor):
         ctx.log(GraphWorker._html(
             f"  · rvc 完成，输出 {out_path}", "#4CAF50"))
         return {"audio_out": NodeValue(type="audio", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：音乐获取(网易云 / B站)
+# ══════════════════════════════════════════════════════════════════════
+
+@register("music_fetch")
+class MusicFetchExec(NodeExecutor):
+    """通过 utils.material_fetcher 按关键字下载第一条匹配音频。
+
+    使用前提：用户已经在素材库子页面接受了免责声明
+    (configs/config.json::materials.disclaimer_accepted == True)。
+    节点这一侧不再二次弹窗 但启动前会做强校验 未同意则直接报错。
+    """
+
+    def execute(self, ctx, inputs, params):
+        from utils.configer import get_field as _gf
+        if not bool(_gf("materials.disclaimer_accepted", False)):
+            raise RuntimeError(
+                "请先打开「音频 → 素材库 - B站/网易云」页面阅读并同意免责声明 "
+                "再使用 music_fetch 节点"
+            )
+
+        keyword = (params.get("keyword") or "").strip()
+        if not keyword:
+            raise RuntimeError("music_fetch: 请在属性面板填写 keyword (歌名)")
+        source = (params.get("source") or "netease").strip().lower()
+        drop = bool(params.get("drop_instrumental", True))
+
+        # 属性面板"获取"按钮选过条目就把 (keyword, source, id, title) 写在
+        # params 里。这里复用：当 (selected_keyword, selected_source)
+        # 与当前 (keyword, source) 一致 且 selected_id 非空时
+        # 直接按 id 下载 跳过搜索那一步 (用户已经亲自挑过了)
+        sel_kw    = (params.get("selected_keyword") or "").strip()
+        sel_src   = (params.get("selected_source") or "").strip().lower()
+        sel_id    = (params.get("selected_id") or "").strip()
+        sel_title = (params.get("selected_title") or "").strip()
+        use_selected = bool(
+            sel_id and sel_kw == keyword and sel_src == source
+        )
+
+        out_dir = _paths.output_dir("node", "music_fetch")
+        if use_selected:
+            ctx.log(GraphWorker._html(
+                f"  · 使用属性面板选定的 {source} 条目: {sel_title or sel_id}",
+                "#60CDFF"))
+            ctx.sub_progress(5, f"准备下载: {sel_title or sel_id}")
+        else:
+            ctx.log(GraphWorker._html(
+                f"  · 在 {source} 搜索: {keyword}", "#60CDFF"))
+            ctx.sub_progress(5, f"搜索中: {keyword}")
+
+        from utils.material_fetcher import (
+            fetch_first_match, download_netease, download_bilibili,
+            CancelledError,
+        )
+
+        def _prog(p: int, t: str):
+            # 把 0-100 压到 [10, 98] 留点头尾
+            ctx.sub_progress(10 + int(p * 0.88), t)
+            # 关键事件也打到日志便于复盘
+            if p in (0, 100) or "失败" in t:
+                ctx.log(GraphWorker._html(f"    {t}", "#888888"))
+
+        def _cancel() -> bool:
+            return ctx.cancelled
+
+        try:
+            if use_selected:
+                title = sel_title or None
+                if source == "bilibili":
+                    path = download_bilibili(
+                        sel_id, out_dir, title=title,
+                        progress_cb=_prog, cancel_cb=_cancel,
+                    )
+                else:
+                    # 网易云的 song_id 是整数 转一下 不行就回退搜索
+                    try:
+                        nid = int(sel_id)
+                    except (TypeError, ValueError):
+                        nid = None
+                    if nid is None:
+                        ctx.log(GraphWorker._html(
+                            "  · 选定的网易云 id 不是整数 回退到自动匹配",
+                            "#FF9800"))
+                        path = fetch_first_match(
+                            keyword, source=source, out_dir=out_dir,
+                            drop_instrumental=drop,
+                            progress_cb=_prog, cancel_cb=_cancel,
+                        )
+                    else:
+                        path = download_netease(
+                            nid, out_dir, title=title,
+                            progress_cb=_prog, cancel_cb=_cancel,
+                        )
+            else:
+                path = fetch_first_match(
+                    keyword, source=source, out_dir=out_dir,
+                    drop_instrumental=drop,
+                    progress_cb=_prog, cancel_cb=_cancel,
+                )
+        except CancelledError:
+            ctx.log(GraphWorker._html("  · 下载已取消", "#FF9800"))
+            raise RuntimeError("用户取消下载")
+
+        ctx.sub_progress(100, "完成")
+        ctx.log(GraphWorker._html(
+            f"  · music_fetch 完成 → {path}", "#4CAF50"))
+        return {"audio_out": NodeValue(type="audio", path=path)}

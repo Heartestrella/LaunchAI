@@ -65,10 +65,10 @@ from qfluentwidgets import (NavigationItemPosition, setTheme, Theme, FluentWindo
                             InfoBar)
 from widgets.subpage.subpage_demucs import AudioSeparationWidget
 from workers.demucs_worker import DemucsWorker
-# from widgets.subpage.subpage_info_page import SystemInfoPage
 from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
 from widgets.subpage.subpage_switch_pages import SwitchPage
+from widgets.subpage.subpage_materials import MaterialsWidget
 from node.node_editor import NodeEditorPage
 from workers.pip_worker import PipWorker
 from logger import info, warning, debug, error
@@ -104,13 +104,13 @@ class Window(FluentWindow):
             _t = now
 
         self.homeInterface       = HomePage(self);                                          mark("HomePage")
-        # self.systemInfoInterface = SystemInfoPage(self);                                    mark("SystemInfoPage")
         self.settingInterface    = SettingsWidget(self);                                    mark("SettingsWidget")
         self.demucsinterface     = SwitchPage("demucs",  CUDA_DRIVERS, self);               mark("SwitchPage demucs")
         self.ESRGANinterface     = SwitchPage("ESRGAN",  CUDA_DRIVERS, self);               mark("SwitchPage ESRGAN")
         self.whisperInterface    = SwitchPage("whisper", CUDA_DRIVERS, self);               mark("SwitchPage whisper")
         self.rvcInterface        = SwitchPage("rvc",     CUDA_DRIVERS, self);               mark("SwitchPage rvc")
         self.gptsovitsInterface  = SwitchPage("gptsovits", CUDA_DRIVERS, self);             mark("SwitchPage gptsovits")
+        self.materialsInterface  = MaterialsWidget(self);                                   mark("MaterialsWidget")
         self.yoloInterface       = SwitchPage("yolo",    CUDA_DRIVERS, self);               mark("SwitchPage yolo")
         self.iopaintInterface    = SwitchPage("iopaint", CUDA_DRIVERS, self);               mark("SwitchPage iopaint")
         self.nodeEditorInterface = NodeEditorPage(cuda_drivers=CUDA_DRIVERS, parent=self);  mark("NodeEditorPage")
@@ -125,11 +125,11 @@ class Window(FluentWindow):
         page_map = {
             "home": self.homeInterface,
             "setting": self.settingInterface,
-            # "system": self.systemInfoInterface,
             "demucs": self.demucsinterface,
             "whisper": self.whisperInterface,
             "rvc": self.rvcInterface,
             "gptsovits": self.gptsovitsInterface,
+            "materials": self.materialsInterface,
             "node_editor": self.nodeEditorInterface,
             "yolo": self.yoloInterface,
             "iopaint": self.iopaintInterface,
@@ -146,7 +146,6 @@ class Window(FluentWindow):
 
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '主页', )
-        # self.addSubInterface(self.systemInfoInterface, FIF.INFO, '系统信息')
         self.addSubInterface(self.nodeEditorInterface, FIF.EDIT, '节点编辑器')
         audio_parent = Widget('音频', self)
         audio_parent.setObjectName("audioParent")
@@ -212,6 +211,12 @@ class Window(FluentWindow):
             _iopaint_icon,
             '图像修复 - IOPaint',
             parent=image_parent
+        )
+
+        self.addSubInterface(
+            self.materialsInterface,
+            FIF.DOWNLOAD,
+            '素材库',
         )
 
         self.addSubInterface(self.settingInterface, FIF.SETTING,

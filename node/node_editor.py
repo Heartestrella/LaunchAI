@@ -34,7 +34,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtCore import (
     Qt, QPoint, QRectF, QPropertyAnimation, QEasingCurve,
-    QTimer, pyqtSignal
+    QTimer, QThread, pyqtSignal
 )
 from PyQt6.QtWidgets import QFileDialog, QDialog, QDialogButtonBox, QVBoxLayout, QListWidget, QListWidgetItem
 import json
@@ -136,6 +136,25 @@ def _param_display_label(key: str) -> str:
     return f"{key} · {cn}" if cn else key
 
 
+def _format_music_hit(hit: dict) -> str:
+    """把 search_netease/search_bilibili 返回的单条 dict 渲染成下拉显示文本。
+    无副作用 仅供 PropertyPanel.music_fetch 行使用。
+    """
+    src = (hit.get("source") or "").lower()
+    if src == "bilibili":
+        title = hit.get("title", "") or "(无标题)"
+        author = hit.get("author", "") or ""
+        dur = hit.get("duration", "") or ""
+        tail = " / ".join(x for x in (author, dur) if x)
+        return f"{title}  —  {tail}" if tail else title
+    # netease (默认)
+    name = hit.get("name", "") or "(无名)"
+    artists = hit.get("artists", "") or ""
+    album = hit.get("album", "") or ""
+    tail = " / ".join(x for x in (artists, album) if x)
+    return f"{name}  —  {tail}" if tail else name
+
+
 _FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
 _DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
 _DEVICE_PARAM_KEYS = {"device", "gpu", "gpu_id"}
@@ -145,6 +164,13 @@ _DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio
 # 适用于 prompt / 参考文本 / 目标文本 / 注释 等长内容
 _MULTILINE_TEXT_PARAM_KEYS = {"text", "ref_text", "target_text",
                               "prompt", "note", "description"}
+
+# 隐藏参数键 —— 属性面板不渲染这些行 (作为节点内部状态由专属 UI 写入)
+# 例如 music_fetch 的 selected_* 由 keyword 行下方的"获取"下拉直接读写
+_HIDDEN_PARAM_KEYS = {
+    "selected_keyword", "selected_source",
+    "selected_id", "selected_title",
+}
 
 # 已知数值参数的合理范围 (min, max, step) —— 与各子页 UI 保持一致
 # 落到这里的键名会渲染为 SpinBox / DoubleSpinBox 并应用对应范围
@@ -396,6 +422,82 @@ class SectionCard(CardWidget):
                 w.deleteLater()
 
 
+class _ElidedComboBox(ComboBox):
+    """qfluentwidgets.ComboBox 选中长项时会 adjustSize() 把按钮撑得跟项一样宽
+    属性面板列宽有限 这里把按钮宽度钳住 + 显示用 Qt.ElideRight 截尾
+    完整文本保留在 toolTip 里 鼠标悬停可看 下拉菜单仍是完整内容
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 给箭头预留 ~22px 实际文本可用宽度 = width - 22 - 内边距
+        self._arrow_reserve = 26
+
+    def setText(self, text: str):
+        # 父类: QPushButton.setText + self.adjustSize()
+        # 这里换成: 按当前可用宽度做 elide 不调 adjustSize 让外层 layout 决定宽度
+        self._full_text = text or ""
+        self.setToolTip(self._full_text)
+        self._apply_elide()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._apply_elide()
+
+    def _apply_elide(self):
+        full = getattr(self, "_full_text", "") or self.text()
+        if not full:
+            from PyQt6.QtWidgets import QPushButton as _QPB
+            _QPB.setText(self, "")
+            return
+        avail = max(20, self.width() - self._arrow_reserve - 16)
+        fm = self.fontMetrics()
+        elided = fm.elidedText(full, Qt.TextElideMode.ElideRight, avail)
+        from PyQt6.QtWidgets import QPushButton as _QPB
+        _QPB.setText(self, elided)
+
+    def sizeHint(self):
+        # 默认 sizeHint 会用 text 撑宽度 这里给一个合理上限交给 layout
+        sh = super().sizeHint()
+        sh.setWidth(min(sh.width(), 260))
+        return sh
+
+    def minimumSizeHint(self):
+        sh = super().minimumSizeHint()
+        # 让外层能把宽度收到属性面板列宽内 不被按钮的最小宽度顶住
+        sh.setWidth(min(sh.width(), 80))
+        return sh
+
+
+class _MusicSearchThread(QThread):
+    """属性面板里"音乐获取"节点的关键词搜索后台线程。
+    与 widgets/subpage/subpage_materials.py::MaterialsSearchWorker 同源
+    单独一份是为了让 node_editor 不依赖那个 subpage 类。
+    """
+
+    results = pyqtSignal(list)   # list[dict]
+    error   = pyqtSignal(str)
+
+    def __init__(self, source: str, keyword: str, parent=None):
+        super().__init__(parent)
+        self.source = (source or "netease").strip().lower()
+        self.keyword = (keyword or "").strip()
+
+    def run(self):
+        try:
+            from utils.material_fetcher import (
+                search_netease, search_bilibili,
+            )
+            if self.source == "bilibili":
+                rs = search_bilibili(self.keyword, limit=20)
+            else:
+                rs = search_netease(self.keyword, limit=20,
+                                    drop_instrumental=True)
+            self.results.emit(rs or [])
+        except Exception as e:
+            self.error.emit(f"搜索失败: {e}")
+
+
 class PropertyPanel(QWidget):
     """右侧属性面板 (WinUI 3 风格)。"""
 
@@ -491,6 +593,9 @@ class PropertyPanel(QWidget):
         self._params_card.clear_items()
         if node.params:
             for key, val in node.params.items():
+                # 隐藏内部状态键 (例如 music_fetch.selected_* 由 keyword 行的"获取"控件维护)
+                if key in _HIDDEN_PARAM_KEYS:
+                    continue
                 self._params_card.add(self._make_param_row(iid, key, val))
             self._params_card.setVisible(True)
         else:
@@ -524,6 +629,12 @@ class PropertyPanel(QWidget):
         lay.addWidget(name)
 
         key_low = key.lower()
+
+        # ── music_fetch.keyword 特例：LineEdit + 获取按钮 + 候选下拉 ───
+        # 普通节点的 keyword 不命中,只有 music_fetch 这一种节点会走到这
+        node = self.graph.nodes.get(iid)
+        if node and node.def_id == "music_fetch" and key == "keyword":
+            return self._make_music_fetch_keyword_row(iid, key, val, row, lay)
 
         # ── 计算设备：下拉框 ─────────────────────────────────────────
         if key_low in _DEVICE_PARAM_KEYS and self.cuda_drivers:
@@ -717,6 +828,183 @@ class PropertyPanel(QWidget):
             lay.addWidget(edit)
 
         return row
+
+    # ── music_fetch 专属：关键字行 + 获取按钮 + 候选下拉 ─────────────
+    def _make_music_fetch_keyword_row(self, iid: str, key: str, val,
+                                      row: QWidget, lay: QVBoxLayout) -> QWidget:
+        """构建 music_fetch.keyword 的特殊属性行:
+        - 第一行: LineEdit(关键字) + 获取按钮
+        - 第二行: 候选下拉 (空时禁用)
+        选择下拉后把 selected_id/title/source/keyword 写回 node.params;
+        改了关键字或下拉里 source 跟当前不一致则清掉选择 回退 fetch_first_match
+        """
+        # ── 第一行 ────────────────────────────────────────────────
+        wrap = QWidget(row)
+        wlay = QHBoxLayout(wrap)
+        wlay.setContentsMargins(0, 0, 0, 0)
+        wlay.setSpacing(4)
+
+        edit = FLineEdit(wrap)
+        edit.setText(str(val))
+        edit.setClearButtonEnabled(True)
+        edit.setPlaceholderText("歌名 / 视频关键词")
+        wlay.addWidget(edit, 1)
+
+        fetch_btn = PushButton("获取", wrap)
+        fetch_btn.setFixedHeight(30)
+        fetch_btn.setToolTip("按当前关键字 + 数据源在线搜索 填充下方候选列表")
+        wlay.addWidget(fetch_btn)
+
+        lay.addWidget(wrap)
+
+        # ── 第二行 ────────────────────────────────────────────────
+        combo = _ElidedComboBox(row)
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding,
+                            QSizePolicy.Policy.Fixed)
+        combo.setPlaceholderText('点"获取"加载候选 (留空=自动取第一条)')
+        combo.setEnabled(False)
+        # 显式钳住最大宽度 保证 layout 不会因子项太长被撑开
+        combo.setMaximumWidth(320)
+        lay.addWidget(combo)
+
+        # 状态:本次 fetch 返回的原始数据 与 combo 索引对齐
+        # 持有在闭包里 避免再起一个属性挂到 PropertyPanel
+        state: dict = {"hits": [], "syncing": False}
+
+        # ── 关键字写回 graph ─────────────────────────────────────
+        def _on_keyword_changed(text, k=key):
+            self.graph.set_param(iid, k, text)
+            self.param_changed.emit(iid, k, text)
+            # 关键字一改就视作之前选的那一条作废 让执行器回退 fetch_first_match
+            self._clear_music_fetch_selection(iid)
+            # 候选列表是基于旧关键字的 也清掉避免误选
+            state["hits"] = []
+            state["syncing"] = True
+            combo.clear()
+            combo.setEnabled(False)
+            state["syncing"] = False
+        edit.textChanged.connect(_on_keyword_changed)
+
+        # ── 还原已保存的选择 (打开文件 / 选中节点时) ──────────────
+        node = self.graph.nodes.get(iid)
+        saved_id = str((node.params.get("selected_id") if node else "") or "")
+        saved_title = str((node.params.get("selected_title") if node else "") or "")
+        saved_kw = str((node.params.get("selected_keyword") if node else "") or "")
+        saved_src = str((node.params.get("selected_source") if node else "") or "")
+        cur_src = str((node.params.get("source") if node else "") or "netease")
+        # 只有当 (关键字, 数据源) 与保存时一致 才认为这条选择仍然有效
+        if saved_id and saved_title and saved_kw == str(val) and saved_src == cur_src:
+            state["syncing"] = True
+            combo.addItem(f"[已保存] {saved_title}")
+            combo.setEnabled(True)
+            combo.setCurrentIndex(0)
+            state["syncing"] = False
+            # 占位 hits[0] 为 None：选这个项时不重写 selected_* (它们已经是对的)
+            state["hits"] = [None]
+
+        # ── 获取按钮 ─────────────────────────────────────────────
+        # 同时只跑一个搜索线程 旧的覆盖
+        active_thread: dict = {"t": None}
+
+        def _on_fetched(rs, _combo=combo, _state=state):
+            fetch_btn.setEnabled(True)
+            fetch_btn.setText("获取")
+            _state["syncing"] = True
+            _combo.clear()
+            _state["hits"] = list(rs or [])
+            if not _state["hits"]:
+                _combo.setEnabled(False)
+                _state["syncing"] = False
+                InfoBar.warning(
+                    title="无结果",
+                    content="未搜到匹配项 试试换个关键字 / 数据源",
+                    duration=2500, parent=self,
+                ).show()
+                return
+            for it in _state["hits"]:
+                _combo.addItem(_format_music_hit(it))
+            _combo.setEnabled(True)
+            _combo.setCurrentIndex(0)
+            _state["syncing"] = False
+            # 默认选中第一条 同步写回 selected_*
+            _commit_selection(0)
+
+        def _on_search_err(msg):
+            fetch_btn.setEnabled(True)
+            fetch_btn.setText("获取")
+            InfoBar.error(
+                title="搜索失败",
+                content=msg, duration=3000, parent=self,
+            ).show()
+
+        def _on_fetch_click():
+            kw = edit.text().strip()
+            if not kw:
+                InfoBar.warning(
+                    title="关键字为空",
+                    content="先填关键字再点获取",
+                    duration=2000, parent=self,
+                ).show()
+                return
+            node = self.graph.nodes.get(iid)
+            src = str((node.params.get("source") if node else "") or "netease")
+            fetch_btn.setEnabled(False)
+            fetch_btn.setText("搜索中…")
+            t = _MusicSearchThread(src, kw, self)
+            t.results.connect(_on_fetched)
+            t.error.connect(_on_search_err)
+            # 跑完自己回收 不然 QThread 对象会泄漏
+            t.finished.connect(t.deleteLater)
+            active_thread["t"] = t
+            t.start()
+        fetch_btn.clicked.connect(_on_fetch_click)
+
+        # ── 选择变化 → 写回 selected_* ─────────────────────────
+        def _commit_selection(idx):
+            if state["syncing"]:
+                return
+            if idx < 0 or idx >= len(state["hits"]):
+                return
+            hit = state["hits"][idx]
+            if hit is None:
+                # 占位的"[已保存]" 项 — 不改 graph (selected_* 已经是对的)
+                return
+            node = self.graph.nodes.get(iid)
+            if not node:
+                return
+            src = str((node.params.get("source") or "netease"))
+            if src == "bilibili":
+                sid = str(hit.get("bvid") or "")
+                title = f"{hit.get('title','')} - {hit.get('author','')}".strip(" -")
+            else:
+                sid = str(hit.get("id") or "")
+                title = f"{hit.get('name','')} - {hit.get('artists','')}".strip(" -")
+            kw = edit.text().strip()
+            self._set_music_fetch_selection(iid, kw, src, sid, title)
+
+        combo.currentIndexChanged.connect(_commit_selection)
+
+        return row
+
+    # ── 写 / 清 selected_* 的小工具 ─────────────────────────────────
+    def _set_music_fetch_selection(self, iid: str,
+                                   keyword: str, source: str,
+                                   sid: str, title: str):
+        pairs = (
+            ("selected_keyword", keyword),
+            ("selected_source",  source),
+            ("selected_id",      sid),
+            ("selected_title",   title),
+        )
+        for k, v in pairs:
+            self.graph.set_param(iid, k, v)
+            self.param_changed.emit(iid, k, v)
+
+    def _clear_music_fetch_selection(self, iid: str):
+        for k in ("selected_keyword", "selected_source",
+                  "selected_id", "selected_title"):
+            self.graph.set_param(iid, k, "")
+            self.param_changed.emit(iid, k, "")
 
 
 # ══════════════════════════════════════════════════════════════════════

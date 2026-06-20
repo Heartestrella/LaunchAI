@@ -217,6 +217,31 @@ _reg(NodeDef(
 # ── 音频节点 ──────────────────────────────────────────────────────────
 
 _reg(NodeDef(
+    id="music_fetch",
+    title="音乐获取（网易云/B站）",
+    category="音频",
+    # 不需要输入端口 关键字直接走参数；输出一路音频文件 可直接接 demucs/whisper/rvc
+    outputs=[
+        PortDef("audio_out", "音频", "audio"),
+    ],
+    params={
+        "keyword":           "",
+        "source":            "netease",
+        "drop_instrumental": True,
+        # ── 用户在属性面板"获取"后选中的条目 (隐藏 不在面板上以行渲染) ──
+        # 由属性面板的 keyword 行下拉框写入; MusicFetchExec 看到则按 id 直下载
+        # 关键字/源任一改变就被视作失效 回退到 fetch_first_match
+        "selected_keyword":  "",
+        "selected_source":   "",
+        "selected_id":       "",
+        "selected_title":    "",
+    },
+    param_choices={
+        "source": ["netease", "bilibili"],
+    },
+))
+
+_reg(NodeDef(
     id="demucs",
     title="Demucs 音频分离",
     category="音频",

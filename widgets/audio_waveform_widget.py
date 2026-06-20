@@ -424,8 +424,10 @@ class AudioWaveformWidget(QWidget):
         root.setContentsMargins(28, 20, 28, 20)
         root.setSpacing(14)
 
-        # header
-        hdr = QHBoxLayout()
+        # header — 包装成独立 QWidget 便于 set_embedded_mode 整体隐藏
+        self._header_widget = QWidget(self)
+        hdr = QHBoxLayout(self._header_widget)
+        hdr.setContentsMargins(0, 0, 0, 0)
         title = TitleLabel("Audio Waveform")
         title.setStyleSheet("font-size: 20px; font-weight: 600;")
         self._status = CaptionLabel("Idle")
@@ -439,7 +441,7 @@ class AudioWaveformWidget(QWidget):
         hdr.addWidget(self._status, 0, Qt.AlignmentFlag.AlignVCenter)
         hdr.addStretch()
         hdr.addWidget(theme_btn)
-        root.addLayout(hdr)
+        root.addWidget(self._header_widget)
 
         # waveform card
         wave_card = CardWidget(self)
@@ -488,8 +490,8 @@ class AudioWaveformWidget(QWidget):
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._stop)
 
-        sep = QLabel("│")
-        sep.setStyleSheet("color: rgba(255,255,255,0.15); font-size:22px;")
+        self._sep_label = QLabel("│")
+        self._sep_label.setStyleSheet("color: rgba(255,255,255,0.15); font-size:22px;")
 
         self._mic_btn = ToggleButton("  Record", self)
         self._mic_btn.setIcon(FluentIcon.MICROPHONE)
@@ -503,7 +505,7 @@ class AudioWaveformWidget(QWidget):
         cl.addWidget(self._open_btn)
         cl.addWidget(self._play_btn)
         cl.addWidget(self._stop_btn)
-        cl.addWidget(sep)
+        cl.addWidget(self._sep_label)
         cl.addWidget(self._mic_btn)
         cl.addSpacing(12)
         cl.addWidget(self._file_label)
@@ -541,7 +543,17 @@ class AudioWaveformWidget(QWidget):
         start_dir = self._file_root_dir or ""
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Audio File", start_dir,
-            "Audio Files (*.wav *.flac *.mp3 *.ogg *.aiff);;All Files (*)")
+            "Audio Files (*.wav *.flac *.mp3 *.ogg *.aiff *.m4a);;All Files (*)")
+        if not path:
+            return
+        self.load_file(path)
+
+    def load_file(self, path: str):
+        """公开 API 程序化加载音频文件路径 不弹文件选择对话框
+
+        供 SubpageMaterials 等外部页面在预览流程中复用此波形组件。
+        失败通过 InfoBar 报错 不会抛异常出去。
+        """
         if not path:
             return
         self._stop()
@@ -570,6 +582,25 @@ class AudioWaveformWidget(QWidget):
         except Exception as e:
             InfoBar.error(title="Load error", content=str(e), parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=4000)
+
+    def set_embedded_mode(self, embedded: bool):
+        """嵌入模式 隐藏 Header / Open / Record 等冗余组件 留出空间给宿主页面
+
+        - 隐藏: header_widget(标题 + 状态 + 主题按钮) / open_btn / mic_btn / 分隔线
+        - 保留: 波形 / 播放 / 停止 / 当前文件名 caption
+        - 同时把 contentsMargins 收小 紧贴宿主页面卡片边缘
+        """
+        for w in (self._header_widget, self._open_btn,
+                  self._mic_btn, self._sep_label):
+            w.setVisible(not embedded)
+        outer = self.layout()
+        if outer is not None:
+            if embedded:
+                outer.setContentsMargins(0, 0, 0, 0)
+                outer.setSpacing(8)
+            else:
+                outer.setContentsMargins(28, 20, 28, 20)
+                outer.setSpacing(14)
 
     # ── playback ──────────────────────────────────────────────────────────────
     def _toggle_play(self):

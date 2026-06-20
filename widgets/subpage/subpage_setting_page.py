@@ -1,10 +1,15 @@
 import sys
 from logger import info, warning, debug, error
 from PyQt6.QtGui import QDesktopServices, QTextCursor
-from PyQt6.QtCore import QUrl
+from PyQt6.QtCore import QUrl, QThread, pyqtSignal
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
-from qfluentwidgets import SettingCard, FluentIcon as FIF, ElevatedCardWidget, TextEdit, ComboBox, PushButton, ToolTipFilter, IconWidget, MessageBox, InfoBar
+from qfluentwidgets import (
+    SettingCard, FluentIcon as FIF, ElevatedCardWidget, TextEdit, ComboBox,
+    PushButton, PrimaryPushButton, ToolTipFilter, IconWidget, MessageBox, InfoBar,
+    StrongBodyLabel, BodyLabel, CaptionLabel,
+)
 from workers.pip_worker import PipWorker
+from utils.configer import get_field, set_field
 import subprocess
 import re
 CUDA_MAP = {"CPU": "cpu", "CUDA11.8": "118", "CUDA12.4": "124",
@@ -259,6 +264,160 @@ class InstallPyTorchCard(ElevatedCardWidget):
         self.terminal_text.ensureCursorVisible()
 
 
+class _UserInfoWorker(QThread):
+    """异步拉两个平台的用户信息 避免阻塞 settings 页面渲染"""
+    netease  = pyqtSignal(object)   # dict | None
+    bilibili = pyqtSignal(object)
+
+    def run(self):
+        try:
+            from utils._netease_weapi import get_user_info as _ne
+            self.netease.emit(_ne())
+        except Exception:
+            self.netease.emit(None)
+        try:
+            from utils.material_fetcher import get_bilibili_user_info as _bi
+            self.bilibili.emit(_bi())
+        except Exception:
+            self.bilibili.emit(None)
+
+
+class MaterialsAccountCard(ElevatedCardWidget):
+    """素材库账户管理卡片 —— 两个平台共用一张卡 内部分两行"""
+
+    PLATFORMS = (
+        ("netease",  "网易云音乐", FIF.MUSIC),
+        ("bilibili", "哔哩哔哩",  FIF.VIDEO),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 16, 22, 16)
+        root.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(IconWidget(FIF.DOWNLOAD, self))
+        head.addWidget(StrongBodyLabel("素材库账户", self))
+        head.addStretch()
+        root.addLayout(head)
+
+        root.addWidget(CaptionLabel(
+            "登录账号后可解锁更高画质 (B 站 1080P+) 和更高命中率 (网易云 VIP / 付费曲目)，"
+            "登录凭据仅保存在本机 configs/config.json。", self
+        ))
+
+        self._rows: dict[str, dict] = {}
+        for key, name, icon in self.PLATFORMS:
+            row = self._build_row(key, name, icon)
+            root.addLayout(row)
+
+        # 启动时异步刷新一次
+        self._refresh()
+
+    def _build_row(self, key: str, name: str, icon) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        icw = IconWidget(icon, self)
+        icw.setFixedSize(20, 20)
+        row.addWidget(icw)
+        name_lbl = BodyLabel(name, self)
+        name_lbl.setMinimumWidth(96)
+        row.addWidget(name_lbl)
+
+        status_lbl = CaptionLabel("检查中…", self)
+        row.addWidget(status_lbl, 1)
+
+        login_btn = PrimaryPushButton("登录", self, FIF.LINK)
+        login_btn.setFixedWidth(96)
+        login_btn.clicked.connect(lambda _=False, k=key: self._on_login(k))
+        row.addWidget(login_btn)
+
+        logout_btn = PushButton("退出登录", self)
+        logout_btn.setFixedWidth(96)
+        logout_btn.clicked.connect(lambda _=False, k=key: self._on_logout(k))
+        logout_btn.setVisible(False)
+        row.addWidget(logout_btn)
+
+        self._rows[key] = {
+            "status":  status_lbl,
+            "login":   login_btn,
+            "logout":  logout_btn,
+        }
+        return row
+
+    # ── 状态刷新 ───────────────────────────────────────────────────
+
+    def _refresh(self):
+        # 没 cookie 时直接显示未登录 不发请求
+        for key, _name, _ic in self.PLATFORMS:
+            has_cookie = bool((get_field(f"materials.{key}_cookie", "") or "").strip())
+            r = self._rows[key]
+            if not has_cookie:
+                r["status"].setText("未登录")
+                r["login"].setVisible(True)
+                r["logout"].setVisible(False)
+            else:
+                r["status"].setText("已登录 —— 正在查询账号信息…")
+                r["login"].setVisible(False)
+                r["logout"].setVisible(True)
+
+        # 异步拉用户信息
+        self._worker = _UserInfoWorker(self)
+        self._worker.netease.connect(lambda d: self._fill("netease", d))
+        self._worker.bilibili.connect(lambda d: self._fill("bilibili", d))
+        self._worker.start()
+
+    def _fill(self, key: str, data):
+        r = self._rows[key]
+        if data is None:
+            # 有 cookie 但拉不到信息 = cookie 失效
+            has_cookie = bool((get_field(f"materials.{key}_cookie", "") or "").strip())
+            if has_cookie:
+                r["status"].setText("⚠️ 登录已失效 请重新登录")
+                r["login"].setVisible(True)
+                r["login"].setText("重新登录")
+                r["logout"].setVisible(True)
+            return
+        if key == "netease":
+            name = data.get("nickname", "")
+            uid = data.get("userId")
+            vip = "  · VIP" if data.get("vipType", 0) else ""
+            r["status"].setText(f"已登录: {name} (uid {uid}){vip}")
+        else:
+            name = data.get("uname", "")
+            mid = data.get("mid")
+            vip = "  · 大会员" if data.get("vip") else ""
+            r["status"].setText(f"已登录: {name} (mid {mid}){vip}")
+        r["login"].setVisible(False)
+        r["logout"].setVisible(True)
+
+    # ── 按钮 ───────────────────────────────────────────────────────
+
+    def _on_login(self, key: str):
+        from widgets.dialog_qr_login import QRLoginDialog
+        dlg = QRLoginDialog(key, self.window())
+        if dlg.exec():
+            self._refresh()
+
+    def _on_logout(self, key: str):
+        name = {"netease": "网易云音乐", "bilibili": "哔哩哔哩"}[key]
+        box = MessageBox("确认退出登录",
+                         f"将清除本机保存的 {name} 登录凭据。\n"
+                         f"已下载的素材不受影响 但下次需要 VIP / 大会员内容时需要重新登录。",
+                         self.window())
+        box.yesButton.setText("退出登录")
+        box.cancelButton.setText("取消")
+        if not box.exec():
+            return
+        set_field(f"materials.{key}_cookie", "")
+        info(f"[materials] 退出 {key} 登录")
+        InfoBar.success("已退出登录", name,
+                        parent=self.window(), duration=2500)
+        self._refresh()
+
+
 class SettingsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -269,4 +428,8 @@ class SettingsWidget(QWidget):
 
         self.installer = InstallPyTorchCard(self)
         layout.addWidget(self.installer)
+
+        self.materials_card = MaterialsAccountCard(self)
+        layout.addWidget(self.materials_card)
+
         layout.addStretch()
