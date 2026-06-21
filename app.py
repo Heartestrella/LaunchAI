@@ -69,6 +69,7 @@ from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
 from widgets.subpage.subpage_switch_pages import SwitchPage
 from widgets.subpage.subpage_materials import MaterialsWidget
+from widgets.subpage.subpage_llm_chat import LLMChatPage
 from node.node_editor import NodeEditorPage
 from workers.pip_worker import PipWorker
 from logger import info, warning, debug, error
@@ -104,12 +105,14 @@ class Window(FluentWindow):
             _t = now
 
         self.homeInterface       = HomePage(self);                                          mark("HomePage")
+        self.llmChatInterface    = LLMChatPage(self);                                       mark("LLMChatPage")
         self.settingInterface    = SettingsWidget(self);                                    mark("SettingsWidget")
         self.demucsinterface     = SwitchPage("demucs",  CUDA_DRIVERS, self);               mark("SwitchPage demucs")
         self.ESRGANinterface     = SwitchPage("ESRGAN",  CUDA_DRIVERS, self);               mark("SwitchPage ESRGAN")
         self.whisperInterface    = SwitchPage("whisper", CUDA_DRIVERS, self);               mark("SwitchPage whisper")
         self.rvcInterface        = SwitchPage("rvc",     CUDA_DRIVERS, self);               mark("SwitchPage rvc")
         self.gptsovitsInterface  = SwitchPage("gptsovits", CUDA_DRIVERS, self);             mark("SwitchPage gptsovits")
+        self.audiocraftInterface = SwitchPage("audiocraft", CUDA_DRIVERS, self);            mark("SwitchPage audiocraft")
         self.materialsInterface  = MaterialsWidget(self);                                   mark("MaterialsWidget")
         self.yoloInterface       = SwitchPage("yolo",    CUDA_DRIVERS, self);               mark("SwitchPage yolo")
         self.iopaintInterface    = SwitchPage("iopaint", CUDA_DRIVERS, self);               mark("SwitchPage iopaint")
@@ -129,8 +132,10 @@ class Window(FluentWindow):
             "whisper": self.whisperInterface,
             "rvc": self.rvcInterface,
             "gptsovits": self.gptsovitsInterface,
+            "audiocraft": self.audiocraftInterface,
             "materials": self.materialsInterface,
             "node_editor": self.nodeEditorInterface,
+            "llm_chat": self.llmChatInterface,
             "yolo": self.yoloInterface,
             "iopaint": self.iopaintInterface,
         }
@@ -147,6 +152,10 @@ class Window(FluentWindow):
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, '主页', )
         self.addSubInterface(self.nodeEditorInterface, FIF.EDIT, '节点编辑器')
+        _llm_icon = getattr(FIF, "CHAT", None) \
+            or getattr(FIF, "MESSAGE", None) \
+            or FIF.EDIT
+        self.addSubInterface(self.llmChatInterface, _llm_icon, '模型对话')
         audio_parent = Widget('音频', self)
         audio_parent.setObjectName("audioParent")
         self.addSubInterface(audio_parent, FIF.MUSIC, '音频')
@@ -179,6 +188,15 @@ class Window(FluentWindow):
             self.gptsovitsInterface,
             _gptsovits_icon,
             '语音合成 - GPT-SoVITS',
+            parent=audio_parent
+        )
+
+        _audiocraft_icon = getattr(FIF, "MUSIC_FOLDER", None) \
+            or getattr(FIF, "MUSIC", FIF.ALBUM)
+        self.addSubInterface(
+            self.audiocraftInterface,
+            _audiocraft_icon,
+            '音乐生成 - Audiocraft',
             parent=audio_parent
         )
 

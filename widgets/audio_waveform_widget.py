@@ -7,18 +7,20 @@ import numpy as np
 from pathlib import Path
 
 # os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+import re as _icon_re
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QSizePolicy, QFileDialog, QLabel
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, QObject, QRectF, QPointF, pyqtSignal
+    Qt, QTimer, QThread, QObject, QRectF, QPointF, QByteArray, pyqtSignal
 )
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QLinearGradient,
-    QCursor, QMouseEvent
+    QCursor, QMouseEvent, QIcon, QPixmap
 )
+from PyQt6.QtSvg import QSvgRenderer
 
 from qfluentwidgets import (
     setTheme, Theme, setThemeColor, isDarkTheme,
@@ -27,6 +29,29 @@ from qfluentwidgets import (
     TransparentToolButton, FluentIcon,
     InfoBar, InfoBarPosition
 )
+
+from utils.atool import resource_path
+
+
+def _resource_svg_icon(rel_path: str, color: str = "#EAEAEA",
+                       size: int = 20) -> QIcon:
+    """从 resource/icons 下加载 SVG,把 fill 改成 `color` 再渲染成 QIcon。
+    原始 SVG 里 fill=#444 在深色主题下几乎看不见,所以必须二次染色。
+    任何读取 / 解析失败返回空 QIcon,不让 UI 链路崩。
+    """
+    try:
+        with open(resource_path(rel_path), "r", encoding="utf-8") as f:
+            svg = f.read()
+    except OSError:
+        return QIcon()
+    svg = _icon_re.sub(r'fill="#[0-9A-Fa-f]{3,6}"', f'fill="{color}"', svg)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pix)
 
 try:
     import sounddevice as sd
@@ -480,18 +505,28 @@ class AudioWaveformWidget(QWidget):
         self._open_btn.setMinimumWidth(120)
         self._open_btn.clicked.connect(self._open_file)
 
-        self._play_btn = PushButton("▶  Play", self)
+        # 矢量图标:暂停 / 停止 走 resource/icons 下的本地 SVG(项目自带),
+        # 播放暂时回落到 FluentIcon.PLAY —— resource/icons 里目前没有 play.svg,
+        # 等用户补一个 play.svg 后再切。颜色按状态语义着色,深色主题下可见。
+        self._icon_play = FluentIcon.PLAY.icon()
+        self._icon_pause = _resource_svg_icon(
+            "resource/icons/pause.svg", color="#EAEAEA", size=20)
+        self._icon_stop = _resource_svg_icon(
+            "resource/icons/stop.svg", color="#E55454", size=20)
+
+        self._play_btn = PushButton(self._icon_play, "Play")
         self._play_btn.setMinimumWidth(90)
         self._play_btn.setEnabled(False)
         self._play_btn.clicked.connect(self._toggle_play)
 
-        self._stop_btn = PushButton("■  Stop", self)
+        self._stop_btn = PushButton(self._icon_stop, "Stop")
         self._stop_btn.setMinimumWidth(90)
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._stop)
 
         self._sep_label = QLabel("│")
-        self._sep_label.setStyleSheet("color: rgba(255,255,255,0.15); font-size:22px;")
+        self._sep_label.setStyleSheet(
+            "color: rgba(255,255,255,0.15); font-size:22px;")
 
         self._mic_btn = ToggleButton("  Record", self)
         self._mic_btn.setIcon(FluentIcon.MICROPHONE)
@@ -615,7 +650,8 @@ class AudioWaveformWidget(QWidget):
         self._stop_mic()
         self._close_stream()
         self._playing = True
-        self._play_btn.setText("⏸  Pause")
+        self._play_btn.setIcon(self._icon_pause)
+        self._play_btn.setText("Pause")
         self._status.setText("Playing")
         if HAS_SD:
             self._stream = sd.OutputStream(
@@ -633,7 +669,8 @@ class AudioWaveformWidget(QWidget):
                 self._stream.stop()
             except:
                 pass
-        self._play_btn.setText("▶  Play")
+        self._play_btn.setIcon(self._icon_play)
+        self._play_btn.setText("Play")
         self._status.setText("Paused")
 
     def _stop(self):
@@ -770,10 +807,44 @@ class AudioWaveformWidget(QWidget):
         self._canvas.update()
 
     def closeEvent(self, e):
-        self._stop_mic()
-        self._close_stream()
-        self._play_timer.stop()
+        self.cleanup()
         super().closeEvent(e)
+
+    def cleanup(self):
+        """主动释放音频设备 / 定时器 / 解码缓冲。
+
+        嵌入宿主(例如聊天页里折叠媒体卡)用 setParent(None)+deleteLater
+        移除本组件时,Qt 不会触发 closeEvent;同时 sounddevice.OutputStream
+        的 callback 是 bound method `self._audio_cb`,持有 widget 的强引用,
+        在流关闭前 widget 不会被 GC —— 也就会一直占着 `_file_data` 这块
+        几十 MB 的解码缓冲。这里把这些资源都显式拆掉,调用应当幂等。
+        """
+        try:
+            self._stop_mic()
+        except Exception:
+            pass
+        try:
+            self._close_stream()
+        except Exception:
+            pass
+        try:
+            self._play_timer.stop()
+        except Exception:
+            pass
+        # WaveformCanvas 里 16ms 的 idle 动画定时器没保留引用,挨个找出来停掉
+        try:
+            for t in self._canvas.findChildren(QTimer):
+                t.stop()
+        except Exception:
+            pass
+        # 大块缓冲直接断引用,触发立即 GC
+        self._file_data = None
+        self._playing = False
+        try:
+            self._canvas._overview = np.array([])
+            self._canvas._mic_buf = []
+        except Exception:
+            pass
 
 
 # # ─── entry ────────────────────────────────────────────────────────────────────

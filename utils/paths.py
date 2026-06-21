@@ -46,15 +46,17 @@ _OUTPUT_TOOL_DIRS: dict[str, str] = {
     "gptsovits":      "gptsovits",
     "gptsovits_node": "gptsovits_node",
     "iopaint":        "iopaint",
+    "audiocraft":     "audiocraft",
     "node":           "node",
 }
 
 # 工具 -> models/ 下的子目录名
 _MODEL_TOOL_DIRS: dict[str, str] = {
-    "whisper": "whisper",
-    "demucs":  "demucs",
-    "yolo":    "yolo",
-    "iopaint": "iopaint",
+    "whisper":    "whisper",
+    "demucs":     "demucs",
+    "yolo":       "yolo",
+    "iopaint":    "iopaint",
+    "audiocraft": "audiocraft",
 }
 
 

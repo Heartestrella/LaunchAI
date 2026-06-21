@@ -130,6 +130,10 @@ class NoInstallWidget(QWidget):
             description = ("GPT-SoVITS 少样本 TTS / 音色克隆\n"
                            "首次使用前需要从 GitHub 克隆源码并安装依赖\n"
                            "预训练权重需放到 GPT_SoVITS/pretrained_models/")
+        elif package_name == "audiocraft":
+            description = ("Audiocraft 提供 MusicGen 音乐生成 / AudioGen 音效生成\n"
+                           "首次安装将从 GitHub 克隆源码并放宽 av 版本约束\n"
+                           "首次使用将从 HuggingFace 拉取权重 (300MB ~ 3GB 不等)")
         self.desc_label = BodyLabel(
             description,
             self
@@ -153,6 +157,8 @@ class NoInstallWidget(QWidget):
             manual_text = "git clone https://github.com/IAHispano/Applio"
         elif package_name == "GPT-SoVITS":
             manual_text = "git clone https://github.com/RVC-Boss/GPT-SoVITS"
+        elif package_name == "audiocraft":
+            manual_text = "git clone https://github.com/facebookresearch/audiocraft"
         else:
             manual_text = f"pip install {package_name}"
         self.manual_label = BodyLabel(manual_text, self)
@@ -265,6 +271,13 @@ class NoInstallWidget(QWidget):
         elif self.package_name == "GPT-SoVITS":
             self.pip = PipWorker(
                 ["GPT-SoVITS"], from_git=(True, "https://github.com/RVC-Boss/GPT-SoVITS"))
+        elif self.package_name == "audiocraft":
+            # audiocraft 1.3.0 把 av 钉死在 11.0.0,该版本已从 PyPI yank。
+            # 走 git 安装 + PipWorker 的 audiocraft 分支(放宽 av 版本约束)。
+            self.pip = PipWorker(
+                ["audiocraft"],
+                from_git=(True, "https://github.com/facebookresearch/audiocraft"),
+            )
         self.pip.output_signal.connect(self._append_log)
         self.pip.finished_signal.connect(self.on_install_finished)
         self.pip.start()
@@ -374,6 +387,8 @@ class SwitchPage(QWidget):
                 self.handel_iopaint()
             elif self.page_name == "gptsovits":
                 self.handel_gptsovits()
+            elif self.page_name == "audiocraft":
+                self.handel_audiocraft()
 
     def handel_yolo(self):
         from widgets.subpage.subpage_yolov import YoloInferencePage
@@ -470,3 +485,16 @@ class SwitchPage(QWidget):
         installed = bool(get_field("installed.GPT-SoVITS", False))
         info(f"GPT-SoVITS 安装检测: installed.GPT-SoVITS={installed}")
         self.switch_page(1 if installed else 0)
+
+    def handel_audiocraft(self):
+        from widgets.subpage.subpage_audiocraft import AudiocraftWidget
+        self._real_page_0 = NoInstallWidget("audiocraft")
+        self._real_page_1 = AudiocraftWidget(
+            self, device_options=self.CUDA_DRIVERS)
+        self.stacked_layout.addWidget(self._real_page_0)
+        self.stacked_layout.addWidget(self._real_page_1)
+        self._real_page_0.finish.connect(lambda: self.switch_page(1))
+        if not PipWorker.is_package_installed("audiocraft"):
+            self.switch_page(0)
+        else:
+            self.switch_page(1)

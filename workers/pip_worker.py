@@ -25,6 +25,7 @@ fork_map = {
     "Real-ESRGAN": "master",
     "Applio": "3.6.2",
     "GPT-SoVITS": "main",
+    "audiocraft": "main",
 }
 MIRROR_URLS = get_field("git_mirror_hosts", [])
 info(f"获取到GIT加速镜像: {MIRROR_URLS}")
@@ -895,6 +896,87 @@ else:
                 "ℹ️ 请把预训练权重放到仓库 GPT_SoVITS/pretrained_models/ 目录,"
                 "下载地址见 https://github.com/RVC-Boss/GPT-SoVITS#pretrained-models",
                 "#4FC3F7"))
+            self._emit_install_finished(package)
+            return None
+
+        elif package == "audiocraft":
+            # audiocraft 1.3.0 把 av 钉死在 11.0.0,可这个版本：
+            #   - 已从官方 PyPI yank,任何镜像都拿不到 wheel；
+            #   - 源码构建要 Windows SDK 头 (io.h),嵌入式 py311 拿不到。
+            # 解法：克隆源码,放宽 av 版本约束,改装一个有 wheel 的 av (>=12)。
+            # 实测 audiocraft 用的 av API (av.open / Stream / Frame) 在 12.x 仍然兼容。
+            req_file = os.path.join(project_root, "requirements.txt")
+            setup_file = os.path.join(project_root, "setup.py")
+            cfg_file = os.path.join(project_root, "setup.cfg")
+            pyproject_file = os.path.join(project_root, "pyproject.toml")
+
+            # Step 1: 把 `av==11.0.0` 替换成 `av>=11.0.0`,setup.py / requirements
+            # / setup.cfg / pyproject.toml 里都扫一遍
+            av_pin = re.compile(r'av\s*==\s*11\.0\.0')
+            patched = []
+            for path in (req_file, setup_file, cfg_file, pyproject_file):
+                if not os.path.exists(path):
+                    continue
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    new = av_pin.sub('av>=11.0.0', content)
+                    if new != content:
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(new)
+                        patched.append(os.path.basename(path))
+                except Exception as e:
+                    self.output_signal.emit(self._html(
+                        f"⚠️ 放宽 {path} av 约束失败: {e}", "#FF9800"))
+            if patched:
+                self.output_signal.emit(self._html(
+                    f"✅ 已把 {', '.join(patched)} 里的 av==11.0.0 放宽到 av>=11.0.0",
+                    "#4CAF50"))
+
+            # Step 2: 过滤掉 torch* (按项目惯例,torch 由用户在设置里装)
+            if os.path.exists(req_file):
+                self._filter_torch_requirements(req_file)
+                # pesq 在 Windows 上 PyPI 没有预编译 wheel,源码构建要 MSVC + Cython,
+                # 本地装不上。好在 LaunchAI 只跑 MusicGen / AudioGen 推理:
+                #   - audiocraft/metrics/__init__.py 没引出 PesqMetric,import audiocraft
+                #     不会触发 import pesq
+                #   - pesq 只在 metrics/pesq.py(语音质量评估)和 solvers/watermark.py
+                #     (水印训练 solver)里 import,推理路径完全走不到
+                # 直接从 requirements 剥掉,源码保持原样不动。
+                removed = self._strip_requirements(req_file, ("pesq",))
+                if removed:
+                    self.output_signal.emit(self._html(
+                        "已从 requirements 移除: pesq "
+                        "(Windows 无 wheel;只影响训练/水印 solver,推理不需要)",
+                        "#4FC3F7"))
+
+            # Step 3: 先单独装一个 wheel 可用的 av (强制 only-binary,
+            # 防止 pip 看到 av==11.0.0 还是回到源码构建)
+            self.output_signal.emit(self._html(
+                "正在安装 av (绕过 11.0.0 缺 wheel,改装最新可用版本)...",
+                "#4FC3F7"))
+            ok_av = self._run_pip_install(["av", "--only-binary=:all:"])
+            if not ok_av and not self._is_cancelled:
+                self.finished_signal.emit(False, "av 安装失败 (无可用 wheel)")
+                return None
+
+            # Step 4: 装其余依赖
+            if os.path.exists(req_file):
+                self.output_signal.emit(self._html(
+                    "正在安装 audiocraft 依赖 (requirements.txt)...", "#4FC3F7"))
+                ok_req = self._run_pip_install(["-r", req_file])
+                if not ok_req and not self._is_cancelled:
+                    self.finished_signal.emit(False, "audiocraft 依赖安装失败")
+                    return None
+
+            # Step 5: 装 audiocraft 本体 (此时 av 已满足,setup.py 不会再尝试装 av==11)
+            self.output_signal.emit(self._html(
+                "正在安装 audiocraft 本体...", "#4FC3F7"))
+            ok_pkg = self._run_pip_install([project_root])
+            if not ok_pkg and not self._is_cancelled:
+                self.finished_signal.emit(False, "audiocraft 本体安装失败")
+                return None
+
             self._emit_install_finished(package)
             return None
 

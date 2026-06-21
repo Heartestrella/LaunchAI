@@ -43,7 +43,7 @@ FOLDERS = [
     {"icon": FIF.FOLDER,       "name": "根目录",     "path": "."},
     {"icon": FIF.APPLICATION,  "name": "用户配置",  "path": "configs"},
     {"icon": FIF.PHOTO,        "name": "节点",    "path": "configs/nodes"},
-    {"icon": FIF.SAVE_COPY,    "name": "输出",    "path": "output"},
+    {"icon": FIF.SAVE_COPY,    "name": "输出",    "path": "data"},
 ]
 
 NOTICES = [
