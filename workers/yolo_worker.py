@@ -65,6 +65,86 @@ LEGACY_WEIGHTS_DIR = os.path.join(os.getcwd(), "resource", "yolo", "weights")
 DEFAULT_WEIGHTS_DIR = _paths.model_dir("yolo")
 
 
+# ── 下载进度劫持 ─────────────────────────────────────────────────────────
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
+        n /= 1024
+    return f"{n:.1f}GB"
+
+
+def _fmt_speed(bps: float) -> str:
+    return f"{_fmt_bytes(bps)}/s" if bps > 0 else "--"
+
+
+def _patch_ultralytics_download_progress(emit_progress, emit_log) -> None:
+    """劫持 ultralytics 下载用的 TQDM,把字节进度转成 worker 信号。
+
+    ultralytics.utils.downloads 在模块顶层 `from ultralytics.utils import ... TQDM`,
+    跟 huggingface_hub 那次完全一样的 shadowing 模式:utils.tqdm.TQDM 是源,
+    downloads.TQDM 是 copy 进来的引用。我们只覆盖 downloads.TQDM,不动 utils 那边,
+    避免影响 ultralytics 的 train / predict 自带进度条。
+
+    emit_progress: callable(pct: int, status: str)
+    emit_log:      callable(html: str)
+    """
+    try:
+        from ultralytics.utils import downloads as _ul_dl
+    except Exception:
+        return  # 未装或未来重构,直接放行,不阻塞 worker
+
+    if getattr(_ul_dl, "_LAUNCHAI_TQDM_PATCHED", False):
+        return  # 进程内只 patch 一次
+
+    base = _ul_dl.TQDM
+
+    class _HookedTQDM(base):
+        _state: dict = {}
+
+        def _display(self, final: bool = False):
+            # 不调父类 _display(避免 \r\033[K 写到 sys.stdout 污染日志)
+            try:
+                key = id(self)
+                now = time.monotonic()
+                total = int(self.total or 0)
+                n = int(self.n or 0)
+                last_t, last_n = _HookedTQDM._state.get(key, (0.0, 0))
+                done = (total > 0 and n >= total) or final
+                # 完成或首次必报,中间限频 ~5Hz
+                if not done and last_t and (now - last_t) < 0.2:
+                    return
+                speed = max(0, n - last_n) / (now - last_t) if (last_t and now > last_t) else 0.0
+                _HookedTQDM._state[key] = (now, n)
+                desc = (self.desc or "downloading").strip()
+                spd = _fmt_speed(speed)
+                if total > 0:
+                    pct = max(0, min(100, int(n * 100 / total)))
+                    try:
+                        emit_progress(pct, f"下载模型 · {pct}%")
+                    except Exception:
+                        pass
+                    try:
+                        emit_log(
+                            f'<span style="color:#2196F3">'
+                            f'下载进度 {desc} {_fmt_bytes(n)}/{_fmt_bytes(total)} '
+                            f'({pct}%) {spd}</span>')
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        emit_log(
+                            f'<span style="color:#2196F3">'
+                            f'下载进度 {desc} {_fmt_bytes(n)} {spd}</span>')
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    _ul_dl.TQDM = _HookedTQDM
+    _ul_dl._LAUNCHAI_TQDM_PATCHED = True
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  YoloWorker  —  批量推理线程
 # ══════════════════════════════════════════════════════════════════════
@@ -176,6 +256,13 @@ class YoloWorker(QThread):
         self.log_line.emit(self._html(f"▶ 加载权重: {weights}", "#888888"))
         self.log_line.emit(self._html(
             f"  ↳ 缓存目录: {weights_dir}", "#888888"))
+        # 若权重还没下到本地,马上要触发 ultralytics 内部 safe_download。
+        # patch 一下它用的 TQDM,把下载字节进度转成 progress + log_line 信号,
+        # 否则在 UI 上整个加载阶段是静默的(in-process 阻塞)。
+        _patch_ultralytics_download_progress(
+            emit_progress=self.progress.emit,
+            emit_log=self.log_line.emit,
+        )
         t_load = time.time()
 
         # 临时切换 cwd 到 weights_dir，

@@ -69,6 +69,7 @@ from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
 from widgets.subpage.subpage_switch_pages import SwitchPage
 from widgets.subpage.subpage_materials import MaterialsWidget
+from widgets.subpage.subpage_model_hub import ModelHubWidget
 from widgets.subpage.subpage_llm_chat import LLMChatPage
 from node.node_editor import NodeEditorPage
 from workers.pip_worker import PipWorker
@@ -114,6 +115,7 @@ class Window(FluentWindow):
         self.gptsovitsInterface  = SwitchPage("gptsovits", CUDA_DRIVERS, self);             mark("SwitchPage gptsovits")
         self.audiocraftInterface = SwitchPage("audiocraft", CUDA_DRIVERS, self);            mark("SwitchPage audiocraft")
         self.materialsInterface  = MaterialsWidget(self);                                   mark("MaterialsWidget")
+        self.modelHubInterface   = ModelHubWidget(self);                                    mark("ModelHubWidget")
         self.yoloInterface       = SwitchPage("yolo",    CUDA_DRIVERS, self);               mark("SwitchPage yolo")
         self.iopaintInterface    = SwitchPage("iopaint", CUDA_DRIVERS, self);               mark("SwitchPage iopaint")
         self.nodeEditorInterface = NodeEditorPage(cuda_drivers=CUDA_DRIVERS, parent=self);  mark("NodeEditorPage")
@@ -134,6 +136,7 @@ class Window(FluentWindow):
             "gptsovits": self.gptsovitsInterface,
             "audiocraft": self.audiocraftInterface,
             "materials": self.materialsInterface,
+            "model_hub": self.modelHubInterface,
             "node_editor": self.nodeEditorInterface,
             "llm_chat": self.llmChatInterface,
             "yolo": self.yoloInterface,
@@ -235,6 +238,15 @@ class Window(FluentWindow):
             self.materialsInterface,
             FIF.DOWNLOAD,
             '素材库',
+        )
+
+        _modelhub_icon = getattr(FIF, "CLOUD_DOWNLOAD", None) \
+            or getattr(FIF, "LIBRARY", None) \
+            or FIF.DOWNLOAD
+        self.addSubInterface(
+            self.modelHubInterface,
+            _modelhub_icon,
+            '模型市场',
         )
 
         self.addSubInterface(self.settingInterface, FIF.SETTING,

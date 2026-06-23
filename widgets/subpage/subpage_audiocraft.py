@@ -37,7 +37,14 @@ class LogTextEdit(TextEdit):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.setTextCursor(cursor)
         html_text = self._convert_urls_to_links(html_text)
-        cursor.insertHtml(html_text + "<br>")
+        if "下载进度" in html_text:
+            # 进度消息：覆盖当前行，避免下载进度刷屏（与 subpage_switch_pages 一致）
+            cursor.movePosition(
+                QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            cursor.insertHtml(html_text)
+        else:
+            cursor.insertHtml(html_text + "<br>")
         self.ensureCursorVisible()
 
     def _convert_urls_to_links(self, text: str) -> str:

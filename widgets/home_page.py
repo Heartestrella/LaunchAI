@@ -40,7 +40,8 @@ Launch_VER = "C000001 - First version... (2026-6-1 12:00)"
 
 _BANNER_IMG_PATH = resource_path(os.path.join("resource", "home_bg"))
 FOLDERS = [
-    {"icon": FIF.FOLDER,       "name": "根目录",     "path": "."},
+    {"icon": FIF.FOLDER,       "name": "素材库",
+        "path": "data/outputs/node/materials"},
     {"icon": FIF.APPLICATION,  "name": "用户配置",  "path": "configs"},
     {"icon": FIF.PHOTO,        "name": "节点",    "path": "configs/nodes"},
     {"icon": FIF.SAVE_COPY,    "name": "输出",    "path": "data"},

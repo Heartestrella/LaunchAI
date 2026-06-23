@@ -518,6 +518,220 @@ TOOL_REGISTRY: dict[str, dict] = {
         },
         "returns": "成功时返回合成 wav 的绝对路径,聊天里会自动出现可播放的输出卡片",
     },
+    "yolo_detect": {
+        "summary": (
+            "调用本地 YOLO(v8 / v11) 在图片上做目标检测。"
+            "支持单张、整个目录、路径数组 —— 目录会展开成里面所有图片一次跑完。"
+            "\n模型选型(按 enum 取):n 最快但精度低,适合预览;s/m 是常用平衡档;"
+            "l/x 高精度但慢且占显存。v11 比 v8 同档稍精且略慢,首选 yolov8m / yolo11m。"
+            "\n首次使用某个模型会自动从 ultralytics GitHub 下载权重到本地缓存,后续复用。"
+            "\n返回:标注图(画了框)落到 outputs/yolo/llm_<时间戳>/,聊天里会列出文件;"
+            "结构化的检测框 / 类别 / 置信度同时按 save_mode 落 TXT 或 JSON 旁路保存。"
+        ),
+        "params": {
+            "input": {
+                "type": "string | array",
+                "required": True,
+                "desc": "待检测的本地图像绝对路径(.png/.jpg/.jpeg/.webp/.bmp),"
+                        "或一个含图像的目录,或字符串数组批量处理",
+            },
+            "model": {
+                "type": "string",
+                "required": False,
+                "default": "yolov8m.pt",
+                "enum": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
+                         "yolov8l.pt", "yolov8x.pt",
+                         "yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
+                         "yolo11l.pt", "yolo11x.pt"],
+                "desc": "权重文件名(含 .pt 后缀)。从 enum 挑;别凭历史名字猜",
+            },
+            "conf": {
+                "type": "number",
+                "required": False,
+                "default": 0.25,
+                "desc": "置信度阈值 0~1,低于该分数的框丢弃。默认 0.25;"
+                        "想多召回降到 0.15,想少误检升到 0.4",
+            },
+            "iou": {
+                "type": "number",
+                "required": False,
+                "default": 0.45,
+                "desc": "NMS 的 IoU 阈值 0~1,越低越激进合并重叠框",
+            },
+            "device": {
+                "type": "string",
+                "required": False,
+                "default": "auto",
+                "enum": ["auto", "cuda", "cpu"],
+                "desc": "推理设备。auto=有显卡选 cuda,否则 cpu;显存爆了改 cpu",
+            },
+            "classes": {
+                "type": "array",
+                "required": False,
+                "default": None,
+                "desc": "只保留这些 COCO 类别 id(0-79)的检测结果;留空=全部类别。"
+                        "常用:[0]=person,[2]=car,[16]=dog,[17]=cat",
+            },
+            "save_mode": {
+                "type": "string",
+                "required": False,
+                "default": "图片+TXT(YOLO)",
+                "enum": ["图片+TXT(YOLO)", "图片+JSON(COCO)", "仅图片", "不保存"],
+                "desc": "落盘策略。TXT 是 YOLO 格式(每行 class cx cy w h),"
+                        "JSON 是 COCO 格式带 bbox/score",
+            },
+        },
+        "returns": (
+            "成功时返回任务输出目录绝对路径(outputs/yolo/llm_<时间戳>/),"
+            "其下含全部标注图与对应 TXT/JSON;聊天里会自动列出文件"
+        ),
+    },
+    "musicgen_compose": {
+        "summary": (
+            "调用本地 MusicGen 用文字描述生成一段音乐(WAV/MP3)。"
+            "支持单条 prompt,也支持字符串数组并行出多个版本。"
+            "\n模型选型(按 enum):small 最快但糙(8s 片段 GPU 约 5~10s);"
+            "medium 是常用平衡档;large 质量最好但慢且吃显存(>10GB);"
+            "melody 是变体,可以传 melody 参数指定一段参考旋律做风格迁移。"
+            "\n时长 1~30 秒,常用 8~15 秒。GPU 强烈推荐,CPU 上几乎跑不动。"
+            "\n⚠ prompt 用英文效果远好于中文,例如 'cinematic orchestral, "
+            "90s anime opening, energetic and bright'。"
+            "\n首次使用某规模会自动下载到 data/models/audiocraft。"
+        ),
+        "params": {
+            "prompts": {
+                "type": "string | array",
+                "required": True,
+                "desc": "音乐风格 / 情绪描述,英文为主。可传单字符串,"
+                        "也可传字符串数组并行出多个版本",
+            },
+            "model": {
+                "type": "string",
+                "required": False,
+                "default": "small",
+                "enum": ["small", "medium", "large", "melody"],
+                "desc": "MusicGen 规模。small ~1GB / medium ~3GB / large ~6GB / "
+                        "melody 接受 melody 参考音频;按用户对质量与速度的要求选",
+            },
+            "duration": {
+                "type": "number",
+                "required": False,
+                "default": 10,
+                "desc": "时长(秒),范围 1~30。默认 10s;时长越长越占显存,"
+                        "large 在 30s 时容易爆显存",
+            },
+            "melody": {
+                "type": "string",
+                "required": False,
+                "default": None,
+                "desc": "可选,旋律参考音频本地绝对路径(.wav/.mp3);"
+                        "只在 model=\"melody\" 时生效,其它模型会忽略",
+            },
+            "device": {
+                "type": "string",
+                "required": False,
+                "default": "cuda",
+                "enum": ["cuda", "cuda:0", "cuda:1", "cpu"],
+                "desc": "推理设备。强烈推荐 cuda;cpu 上 small 也要分钟级",
+            },
+            "temperature": {
+                "type": "number",
+                "required": False,
+                "default": 1.0,
+                "desc": "采样温度。越高越发散,通常 0.8~1.2",
+            },
+            "top_k": {
+                "type": "number",
+                "required": False,
+                "default": 250,
+                "desc": "top-k 采样。一般保持默认 250",
+            },
+            "cfg_coef": {
+                "type": "number",
+                "required": False,
+                "default": 3.0,
+                "desc": "classifier-free guidance 系数。越高越贴 prompt 但音质可能下降",
+            },
+            "output_format": {
+                "type": "string",
+                "required": False,
+                "default": "wav",
+                "enum": ["wav", "mp3"],
+                "desc": "落盘格式,wav 无损 / mp3 占空间小",
+            },
+        },
+        "returns": (
+            "成功时返回任务输出目录绝对路径(outputs/audiocraft/llm_<时间戳>/),"
+            "其下含 musicgen_<时间戳>_NN.wav/.mp3;聊天里会自动列出可播放的音频卡片"
+        ),
+    },
+    "audiogen_create": {
+        "summary": (
+            "调用本地 AudioGen 用文字描述生成环境声 / 音效片段(WAV/MP3),不是音乐。"
+            "适合下雨声、键盘敲击、街道喧闹、玻璃破碎这类 sound design 场景。"
+            "\n模型当前只发了 medium 一档(~1.5GB),GPU 必备。"
+            "\n时长 1~30 秒,常用 5~10 秒;prompt 用英文效果好于中文。"
+            "\n⚠ 想要音乐请用 musicgen_compose;AudioGen 不会生成有调旋律。"
+        ),
+        "params": {
+            "prompts": {
+                "type": "string | array",
+                "required": True,
+                "desc": "音效描述,英文为主。可传单字符串,"
+                        "也可传字符串数组并行出多个版本。"
+                        "例如 'heavy rain on roof, distant thunder'",
+            },
+            "model": {
+                "type": "string",
+                "required": False,
+                "default": "medium",
+                "enum": ["medium"],
+                "desc": "AudioGen 规模。当前 facebook 只发了 medium",
+            },
+            "duration": {
+                "type": "number",
+                "required": False,
+                "default": 8,
+                "desc": "时长(秒),范围 1~30。默认 8s",
+            },
+            "device": {
+                "type": "string",
+                "required": False,
+                "default": "cuda",
+                "enum": ["cuda", "cuda:0", "cuda:1", "cpu"],
+                "desc": "推理设备。强烈推荐 cuda",
+            },
+            "temperature": {
+                "type": "number",
+                "required": False,
+                "default": 1.0,
+                "desc": "采样温度,越高越发散",
+            },
+            "top_k": {
+                "type": "number",
+                "required": False,
+                "default": 250,
+                "desc": "top-k 采样,保持默认 250 即可",
+            },
+            "cfg_coef": {
+                "type": "number",
+                "required": False,
+                "default": 3.0,
+                "desc": "classifier-free guidance 系数",
+            },
+            "output_format": {
+                "type": "string",
+                "required": False,
+                "default": "wav",
+                "enum": ["wav", "mp3"],
+                "desc": "落盘格式",
+            },
+        },
+        "returns": (
+            "成功时返回任务输出目录绝对路径(outputs/audiocraft/llm_<时间戳>/),"
+            "其下含 audiogen_<时间戳>_NN.wav/.mp3;聊天里会自动列出可播放的音频卡片"
+        ),
+    },
     "realesrgan_upscale": {
         "summary": (
             "调用本地 Real-ESRGAN (ncnn-vulkan) 对图片做超分放大。"
@@ -1837,6 +2051,9 @@ class LLMChatPage(QWidget):
             "rvc_convert": self._tool_rvc_convert,
             "gptsovits_tts": self._tool_gptsovits_tts,
             "realesrgan_upscale": self._tool_realesrgan_upscale,
+            "yolo_detect": self._tool_yolo_detect,
+            "musicgen_compose": self._tool_musicgen_compose,
+            "audiogen_create": self._tool_audiogen_create,
             "search_song": self._tool_search_song,
             "download_song": self._tool_download_song,
             "fetch_song": self._tool_fetch_song,
@@ -2637,9 +2854,15 @@ class LLMChatPage(QWidget):
         - 返回值是文件 -> 单元素列表(命中白名单)
         - 返回值是目录 -> 列出直接子文件里命中白名单的
         - 其它 -> 空列表
+
+        兼容 result 含附加信息的多行格式(yolo_detect 用):首行非空当作路径。
         """
         if not path:
             return []
+        if "\n" in path:
+            first = path.splitlines()[0].strip()
+            if first:
+                path = first
         media_exts = (ToolCallCard.AUDIO_EXTS
                       | ToolCallCard.VIDEO_EXTS
                       | ToolCallCard.IMAGE_EXTS)
@@ -3294,6 +3517,235 @@ class LLMChatPage(QWidget):
                     "realesrgan_upscale", True, output_dir))
             worker.error.connect(_wrap_error)
             worker.start()
+
+    def _tool_yolo_detect(self, args: dict):
+        """启动 YoloWorker 做图像目标检测。
+
+        YoloWorker.finished 发的是 (success_count, elapsed) —— 拿不到产物路径,
+        所以这里把 out_dir 提前算好作为 result 喂给 _on_tool_done,_collect_media
+        扫这个目录捞标注图。每次任务用 outputs/yolo/llm_<时间戳>/ 子目录,
+        避免和 UI 页面 / 历史结果搅在一起。
+        """
+        import time as _time
+        import glob as _glob
+        from workers.yolo_worker import YoloWorker, DEFAULT_WEIGHTS_DIR
+        from utils import paths as _paths
+
+        # ── 输入展开:支持单字符串 / 数组 / 目录 ─────────────────────────────
+        _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+        raw = args.get("input")
+        if isinstance(raw, str):
+            raw = [raw.strip()] if raw.strip() else []
+        elif isinstance(raw, list):
+            raw = [p.strip() for p in raw if isinstance(p, str) and p.strip()]
+        else:
+            raw = []
+
+        if not raw:
+            self._on_tool_done(
+                "yolo_detect", False,
+                "缺少 input 参数(本地图像/目录绝对路径,可单字符串或字符串数组)")
+            return
+
+        files: list[str] = []
+        for p in raw:
+            if not os.path.exists(p):
+                self._on_tool_done(
+                    "yolo_detect", False, f"输入不存在: {p}")
+                return
+            if os.path.isdir(p):
+                for ext in _IMG_EXTS:
+                    files.extend(sorted(_glob.glob(os.path.join(p, f"*{ext}"))))
+                    files.extend(sorted(_glob.glob(os.path.join(p, f"*{ext.upper()}"))))
+            else:
+                files.append(p)
+        # 去重保序
+        seen = set()
+        files = [f for f in files if not (f in seen or seen.add(f))]
+        if not files:
+            self._on_tool_done(
+                "yolo_detect", False,
+                "未在 input 里找到任何图像文件(支持 png/jpg/jpeg/webp/bmp/tif)")
+            return
+
+        def pick(name, default):
+            v = args.get(name)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                return default
+            return v.strip() if isinstance(v, str) else v
+
+        # 数值字段强制转,防 LLM 发字符串
+        try:
+            conf = float(pick("conf", 0.25))
+        except (TypeError, ValueError):
+            conf = 0.25
+        try:
+            iou = float(pick("iou", 0.45))
+        except (TypeError, ValueError):
+            iou = 0.45
+        conf = min(1.0, max(0.0, conf))
+        iou = min(1.0, max(0.0, iou))
+
+        model_name = pick("model", "yolov8m.pt")
+        if not model_name.endswith(".pt"):
+            model_name += ".pt"
+        # 权重绝对路径:首次跑 ultralytics 会自己下载到 weights_dir
+        weights = os.path.join(DEFAULT_WEIGHTS_DIR, model_name)
+
+        # 输出子目录:llm_<时间戳>,避免和 GUI 页面共用 outputs/yolo/ 顶层混杂
+        out_dir = _paths.output_dir("yolo", f"llm_{_time.strftime('%Y%m%d_%H%M%S')}")
+
+        classes = args.get("classes")
+        if isinstance(classes, list):
+            classes = [int(c) for c in classes if isinstance(c, (int, float))]
+            if not classes:
+                classes = None
+        else:
+            classes = None
+
+        save_mode = pick("save_mode", "图片+TXT(YOLO)")
+        if save_mode not in ("图片+TXT(YOLO)", "图片+JSON(COCO)", "仅图片", "不保存"):
+            save_mode = "图片+TXT(YOLO)"
+
+        params = {
+            "weights":     weights,
+            "weights_dir": DEFAULT_WEIGHTS_DIR,
+            "imgsz":       640,
+            "conf":        conf,
+            "iou":         iou,
+            "max_det":     300,
+            "device":      pick("device", "auto"),
+            "fp16":        True,
+            "tta":         False,
+            "agnostic":    False,
+            "classes":     classes,
+            "out_dir":     out_dir,
+            "save_mode":   save_mode,
+            "draw_boxes":  True,
+            "draw_label":  True,
+            "line_w":      2,
+        }
+
+        worker = YoloWorker(files, params)
+        self._tool_worker = worker
+        worker.progress.connect(self._on_tool_progress)
+        # yolo 的 finished 签名是 (int success, float elapsed) —— 拿不到路径,
+        # 用提前算好的 out_dir,_collect_media 扫目录捞标注图
+        worker.finished.connect(
+            lambda count, elapsed: self._on_tool_done(
+                "yolo_detect", True,
+                f"{out_dir}\n({count}/{len(files)} 张完成,耗时 {elapsed:.1f}s)"))
+        worker.error.connect(
+            lambda msg: self._on_tool_done("yolo_detect", False, msg))
+        worker.start()
+
+    def _tool_musicgen_compose(self, args: dict):
+        self._start_audiocraft(args, "musicgen", "musicgen_compose")
+
+    def _tool_audiogen_create(self, args: dict):
+        self._start_audiocraft(args, "audiogen", "audiogen_create")
+
+    def _start_audiocraft(self, args: dict, task: str, tool_name: str):
+        """MusicGen / AudioGen 共用入口。
+
+        AudiocraftWorker.finished 发的是输出目录绝对路径,_collect_media 直接扫
+        目录就能拿到 wav/mp3。每次任务用 outputs/audiocraft/llm_<时间戳>/ 子目录,
+        避免和 GUI 历史结果搅在一起。
+        """
+        import time as _time
+        from workers.audiocraft_worker import AudiocraftWorker
+        from utils import paths as _paths
+
+        # ── prompts:单字符串 / 数组,兼容 LLM 误传 prompt 单数键 ──────────
+        raw = args.get("prompts")
+        if raw is None:
+            raw = args.get("prompt")
+        if isinstance(raw, str):
+            prompts = [raw.strip()] if raw.strip() else []
+        elif isinstance(raw, list):
+            prompts = [str(p).strip() for p in raw if str(p).strip()]
+        else:
+            prompts = []
+
+        if not prompts:
+            self._on_tool_done(
+                tool_name, False,
+                "缺少 prompts(音乐/音效描述,英文为主,单字符串或字符串数组都行)")
+            return
+
+        def pick(name, default):
+            v = args.get(name)
+            if v is None or (isinstance(v, str) and not v.strip()):
+                return default
+            return v.strip() if isinstance(v, str) else v
+
+        # ── 数值字段强转,防 LLM 传字符串 ─────────────────────────────────
+        try:
+            duration = float(pick("duration", 10.0 if task == "musicgen" else 8.0))
+        except (TypeError, ValueError):
+            duration = 10.0 if task == "musicgen" else 8.0
+        duration = max(1.0, min(30.0, duration))
+
+        try:
+            temperature = float(pick("temperature", 1.0))
+        except (TypeError, ValueError):
+            temperature = 1.0
+        try:
+            top_k = int(pick("top_k", 250))
+        except (TypeError, ValueError):
+            top_k = 250
+        try:
+            top_p = float(pick("top_p", 0.0))
+        except (TypeError, ValueError):
+            top_p = 0.0
+        try:
+            cfg_coef = float(pick("cfg_coef", 3.0))
+        except (TypeError, ValueError):
+            cfg_coef = 3.0
+
+        default_model = "small" if task == "musicgen" else "medium"
+        model = pick("model", default_model)
+        device = pick("device", "cuda")
+        output_format = (pick("output_format", "wav") or "wav").lower()
+        if output_format not in ("wav", "mp3"):
+            output_format = "wav"
+
+        melody = pick("melody", "") or ""
+        if melody:
+            if task != "musicgen":
+                melody = ""  # audiogen 不支持 melody,静默忽略
+            elif not os.path.isfile(melody):
+                self._on_tool_done(
+                    tool_name, False, f"melody 文件不存在: {melody}")
+                return
+
+        out_dir = _paths.output_dir(
+            "audiocraft", f"llm_{_time.strftime('%Y%m%d_%H%M%S')}")
+
+        params = {
+            "task":          task,
+            "model":         model,
+            "device":        device,
+            "prompts":       prompts,
+            "melody":        melody,
+            "output":        out_dir,
+            "output_format": output_format,
+            "duration":      duration,
+            "top_k":         top_k,
+            "top_p":         top_p,
+            "temperature":   temperature,
+            "cfg_coef":      cfg_coef,
+        }
+
+        worker = AudiocraftWorker(params)
+        self._tool_worker = worker
+        worker.progress.connect(self._on_tool_progress)
+        # finished 发输出目录绝对路径
+        worker.finished.connect(
+            lambda result_dir: self._on_tool_done(tool_name, True, result_dir))
+        worker.error.connect(
+            lambda msg: self._on_tool_done(tool_name, False, msg))
+        worker.start()
 
     # 素材抓取:三个工具共享一个 MaterialFetchWorker,只是 op 不同 -----------------
     def _materials_out_dir(self):

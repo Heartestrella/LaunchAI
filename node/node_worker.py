@@ -1553,3 +1553,232 @@ class MusicFetchExec(NodeExecutor):
         ctx.log(GraphWorker._html(
             f"  · music_fetch 完成 → {path}", "#4CAF50"))
         return {"audio_out": NodeValue(type="audio", path=path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：LLM 提示词节点(非流式)
+# ══════════════════════════════════════════════════════════════════════
+
+@register("llm_prompt")
+class LLMPromptExec(NodeExecutor):
+    """非流式调用 OpenAI 兼容 /chat/completions 一次拿到文本输出。
+
+    config 路径: ``llm_chat.{base_url, model, api_key}``;
+    节点的 params.{base_url,model,api_key} 非空时仅本节点覆盖 不写回 config。
+    """
+
+    def execute(self, ctx, inputs, params):
+        import json
+        import urllib.request
+        import urllib.error
+        from utils.configer import get_field
+        from node.node_registry import LLM_SYSTEM_TEMPLATES
+
+        # ── 配置:节点 override 优先 config 兜底 ──────────────────────────
+        base_url = ((params.get("base_url") or "").strip()
+                    or (get_field("llm_chat.base_url", "") or "").strip())
+        model = ((params.get("model") or "").strip()
+                 or (get_field("llm_chat.model", "") or "").strip())
+        api_key = ((params.get("api_key") or "").strip()
+                   or (get_field("llm_chat.api_key", "") or "").strip())
+        if not base_url:
+            raise RuntimeError(
+                "llm_prompt: 未配置 base_url(请在设置页填 LLM 服务地址 "
+                "或在节点属性里临时填一份)")
+        if not model:
+            raise RuntimeError(
+                "llm_prompt: 未配置 model(请在设置页选模型 或在节点属性里填)")
+
+        # ── 模板 + 用户 prompt + 端口附加上下文 ─────────────────────────
+        template = (params.get("template") or "自定义").strip()
+        system_prompt = LLM_SYSTEM_TEMPLATES.get(template, "")
+        user_prompt = (params.get("prompt") or "").strip()
+
+        ctx_in = inputs.get("context_in")
+        if ctx_in is not None and ctx_in.path and os.path.isfile(ctx_in.path):
+            try:
+                with open(ctx_in.path, "r", encoding="utf-8") as f:
+                    extra = f.read().strip()
+                if extra:
+                    user_prompt = (
+                        f"{user_prompt}\n\n{extra}" if user_prompt else extra
+                    )
+                    ctx.log(GraphWorker._html(
+                        f"  · 从 context_in 读取 {len(extra)} 字", "#CCCCCC"))
+            except Exception as exc:
+                ctx.log(GraphWorker._html(
+                    f"  · 读取 context_in 失败: {exc}", "#FF9800"))
+
+        if not user_prompt:
+            raise RuntimeError(
+                "llm_prompt: 提示词为空(prompt 参数和 context_in 端口都没东西)")
+
+        messages: list = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+
+        temperature = float(params.get("temperature", 0.7) or 0.7)
+
+        ctx.log(GraphWorker._html(
+            f"  · 调用 {model} (模板={template}, T={temperature}, "
+            f"提示词 {len(user_prompt)} 字)",
+            "#60CDFF"))
+        ctx.sub_progress(20, f"调用 {model}")
+
+        # ── 非流式 POST ───────────────────────────────────────────────
+        url = base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        req = urllib.request.Request(
+            url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            body = ""
+            try:
+                body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            raise RuntimeError(f"LLM HTTP {e.code}: {body[:400]}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"LLM 网络错误: {e.reason}")
+
+        ctx.sub_progress(80, "解析响应")
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            raise RuntimeError(f"LLM 返回不是 JSON: {raw[:200]}")
+
+        choices = obj.get("choices") or []
+        if not choices:
+            err = obj.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else ""
+            raise RuntimeError(
+                f"LLM 返回空 choices: {msg or raw[:200]}")
+        text = ((choices[0].get("message") or {}).get("content") or "").strip()
+        if not text:
+            raise RuntimeError("LLM 返回的 content 为空")
+
+        # ── 落盘 与 text_input 节点约定一致 ─────────────────────────────
+        out_dir = _paths.output_dir("node", "llm_prompt")
+        out_path = os.path.join(
+            out_dir, f"llm_{uuid.uuid4().hex[:8]}.txt")
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+        ctx.log(GraphWorker._html(
+            f"  · 生成 {len(text)} 字 → {out_path}", "#4CAF50"))
+        ctx.sub_progress(100, "完成")
+        return {"text_out": NodeValue(type="text", path=out_path)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  内置 Executor：AudioCraft (MusicGen / AudioGen)
+# ══════════════════════════════════════════════════════════════════════
+
+@register("audiocraft")
+class AudiocraftExec(NodeExecutor):
+    """调用 AudiocraftWorker 生成音乐/音效 取第一个产出文件作为 audio_out。
+
+    输入端口:
+        prompt_in (text)  可选,接 LLM 提示词节点;端口未接时用 prompt 参数
+    输出端口:
+        audio_out (audio) 第一个 wav/mp3 (一次 prompt = 一个文件)
+    """
+
+    def execute(self, ctx, inputs, params):
+        from workers.audiocraft_worker import AudiocraftWorker
+
+        # ── prompt:端口优先 参数兜底 ──────────────────────────────────
+        prompt = ""
+        pin = inputs.get("prompt_in")
+        if pin is not None and pin.path and os.path.isfile(pin.path):
+            try:
+                with open(pin.path, "r", encoding="utf-8") as f:
+                    prompt = f.read().strip()
+                if prompt:
+                    ctx.log(GraphWorker._html(
+                        f"  · 从 prompt_in 读取 {len(prompt)} 字", "#CCCCCC"))
+            except Exception as exc:
+                ctx.log(GraphWorker._html(
+                    f"  · 读取 prompt_in 失败 回退到参数: {exc}", "#FF9800"))
+        if not prompt:
+            prompt = (params.get("prompt") or "").strip()
+        if not prompt:
+            raise RuntimeError(
+                "audiocraft: 缺少提示词 (prompt_in 端口未连接且 prompt 参数也未填)")
+
+        task = str(params.get("task", "musicgen") or "musicgen").lower()
+        if task not in ("musicgen", "audiogen"):
+            task = "musicgen"
+
+        # ── 输出目录:专用子目录 方便扫产物 ────────────────────────────
+        out_dir = os.path.join(
+            _paths.output_dir("node", "audiocraft"),
+            uuid.uuid4().hex[:8])
+        os.makedirs(out_dir, exist_ok=True)
+
+        worker_params = {
+            "task":          task,
+            "model":         str(params.get("model")
+                                 or ("small" if task == "musicgen" else "medium")),
+            "device":        str(params.get("device", "cuda")),
+            "prompts":       [prompt],
+            "duration":      float(params.get("duration", 10.0) or 10.0),
+            "temperature":   float(params.get("temperature", 1.0) or 1.0),
+            "top_k":         int(params.get("top_k", 250) or 250),
+            "cfg_coef":      float(params.get("cfg_coef", 3.0) or 3.0),
+            "output_format": str(params.get("output_format", "wav")
+                                 or "wav").lower(),
+            "output":        out_dir,
+        }
+
+        worker = AudiocraftWorker(worker_params)
+
+        def _fwd_output(line: str):
+            ctx.log(line)
+
+        def _fwd_progress(percent: int, status: str):
+            ctx.sub_progress(percent, status)
+
+        result_dir, err = run_qthread_blocking(
+            worker,
+            on_output=_fwd_output,
+            on_progress=_fwd_progress,
+            on_cancelled=lambda: ctx.cancelled,
+        )
+        if ctx.cancelled:
+            return {}
+        if err:
+            raise RuntimeError(f"audiocraft 执行失败: {err}")
+        if not result_dir or not os.path.isdir(result_dir):
+            raise RuntimeError(
+                f"audiocraft: 输出目录无效: {result_dir}")
+
+        # ── 扫第一个音频文件 ─────────────────────────────────────────
+        audio_exts = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
+        candidates = sorted(
+            f for f in os.listdir(result_dir)
+            if f.lower().endswith(audio_exts))
+        if not candidates:
+            raise RuntimeError(
+                f"audiocraft: 输出目录里没有音频文件: {result_dir}")
+        first_path = os.path.join(result_dir, candidates[0])
+        ctx.log(GraphWorker._html(
+            f"  · 生成 {len(candidates)} 个 取首个 → {first_path}",
+            "#4CAF50"))
+        return {"audio_out": NodeValue(type="audio", path=first_path)}

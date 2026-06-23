@@ -2,11 +2,13 @@ import sys
 from logger import info, warning, debug, error
 from PyQt6.QtGui import QDesktopServices, QTextCursor
 from PyQt6.QtCore import QUrl, QThread, pyqtSignal
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
+from PyQt6.QtCore import Qt
 from qfluentwidgets import (
     SettingCard, FluentIcon as FIF, ElevatedCardWidget, TextEdit, ComboBox,
+    EditableComboBox, LineEdit, PasswordLineEdit,
     PushButton, PrimaryPushButton, ToolTipFilter, IconWidget, MessageBox, InfoBar,
-    StrongBodyLabel, BodyLabel, CaptionLabel,
+    StrongBodyLabel, BodyLabel, CaptionLabel, SingleDirectionScrollArea,
 )
 from workers.pip_worker import PipWorker
 from utils.configer import get_field, set_field
@@ -418,18 +420,251 @@ class MaterialsAccountCard(ElevatedCardWidget):
         self._refresh()
 
 
+class LLMConfigCard(ElevatedCardWidget):
+    """LLM 服务配置卡片 —— 给节点编辑器里的「LLM 提示词」节点用。
+
+    与内置聊天页(subpage_llm_chat)共享同一份配置 ``configs/config.json::llm_chat``;
+    设置页这里改完聊天页打开时也即时生效,反之亦然。节点 executor
+    (node_worker.LLMPromptExec)只读 ``llm_chat.{base_url, model, api_key}``,
+    所以这里写回这三个字段就够节点直接用。
+    """
+
+    # provider/model 拉取在子线程跑;Qt 警告 "QObject::startTimer: Timers
+    # cannot be started from another thread" 通常是 worker parent 串错,这里
+    # 不传 parent 用 self 持引用即可。
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 16, 22, 16)
+        root.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(IconWidget(FIF.EDUCATION, self))
+        head.addWidget(StrongBodyLabel("LLM 服务配置", self))
+        head.addStretch()
+        root.addLayout(head)
+
+        root.addWidget(CaptionLabel(
+            "用于节点编辑器中的「LLM 提示词」节点(同时也是聊天页的服务配置)。"
+            "API Key 仅保存在本机 configs/config.json。", self
+        ))
+
+        # 懒导入:避免 settings 模块顶部强拉聊天页(它会顺带 import 一大票
+        # qfluentwidgets 与正则、urllib 等;放到这里只有打开设置页才付出代价)
+        from widgets.subpage.subpage_llm_chat import PROVIDER_PRESETS, ModelListWorker
+        self._presets = PROVIDER_PRESETS
+        self._ModelListWorker = ModelListWorker
+
+        # ── 服务商 ──────────────────────────────────────────────────────
+        row_provider = QHBoxLayout()
+        row_provider.setSpacing(10)
+        lbl_p = BodyLabel("服务商", self)
+        lbl_p.setMinimumWidth(70)
+        row_provider.addWidget(lbl_p)
+        self.provider_box = ComboBox(self)
+        self.provider_box.addItems(list(self._presets.keys()))
+        self.provider_box.currentTextChanged.connect(self._on_provider_changed)
+        row_provider.addWidget(self.provider_box, 1)
+        root.addLayout(row_provider)
+
+        # ── Base URL ───────────────────────────────────────────────────
+        row_url = QHBoxLayout()
+        row_url.setSpacing(10)
+        lbl_u = BodyLabel("Base URL", self)
+        lbl_u.setMinimumWidth(70)
+        row_url.addWidget(lbl_u)
+        self.url_edit = LineEdit(self)
+        self.url_edit.setPlaceholderText("https://api.example.com/v1")
+        row_url.addWidget(self.url_edit, 1)
+        root.addLayout(row_url)
+
+        # ── API Key ────────────────────────────────────────────────────
+        row_key = QHBoxLayout()
+        row_key.setSpacing(10)
+        lbl_k = BodyLabel("API Key", self)
+        lbl_k.setMinimumWidth(70)
+        row_key.addWidget(lbl_k)
+        self.key_edit = PasswordLineEdit(self)
+        self.key_edit.setPlaceholderText("sk-...")
+        row_key.addWidget(self.key_edit, 1)
+        root.addLayout(row_key)
+
+        # ── 模型 + 拉取按钮 ────────────────────────────────────────────
+        row_model = QHBoxLayout()
+        row_model.setSpacing(10)
+        lbl_m = BodyLabel("模型", self)
+        lbl_m.setMinimumWidth(70)
+        row_model.addWidget(lbl_m)
+        self.model_box = EditableComboBox(self)
+        self.model_box.setPlaceholderText("手动填写或点右侧按钮拉取")
+        row_model.addWidget(self.model_box, 1)
+        self.fetch_btn = PushButton("拉取模型", self, FIF.SYNC)
+        self.fetch_btn.setFixedWidth(110)
+        self.fetch_btn.clicked.connect(self._on_fetch_models)
+        row_model.addWidget(self.fetch_btn)
+        root.addLayout(row_model)
+
+        # ── 保存按钮 ───────────────────────────────────────────────────
+        row_btn = QHBoxLayout()
+        row_btn.addStretch()
+        self.save_btn = PrimaryPushButton("保存", self, FIF.SAVE)
+        self.save_btn.setFixedWidth(110)
+        self.save_btn.clicked.connect(self._on_save)
+        row_btn.addWidget(self.save_btn)
+        root.addLayout(row_btn)
+
+        self._model_worker = None
+        self._load_from_config()
+
+    # ── 加载 / 保存 ──────────────────────────────────────────────────────
+    def _load_from_config(self):
+        provider = (get_field("llm_chat.provider", "") or "").strip()
+        base_url = (get_field("llm_chat.base_url", "") or "").strip()
+        api_key = (get_field("llm_chat.api_key", "") or "").strip()
+        model = (get_field("llm_chat.model", "") or "").strip()
+        cached_models = get_field("llm_chat.models", []) or []
+
+        # provider 失配(老配置 / 用户改过 preset 名)时落到「自定义」,避免下拉
+        # 显示一个 placeholder 让用户以为没选
+        if provider not in self._presets:
+            provider = "自定义"
+        # blockSignals 避免触发 _on_provider_changed 覆盖刚加载的 base_url
+        self.provider_box.blockSignals(True)
+        self.provider_box.setCurrentText(provider)
+        self.provider_box.blockSignals(False)
+
+        self.url_edit.setText(base_url)
+        self.key_edit.setText(api_key)
+
+        # model 下拉:优先用缓存的远端列表 + 当前 model 顶到首位
+        items: list[str] = []
+        if isinstance(cached_models, list):
+            items = [str(m) for m in cached_models if m]
+        if model and model not in items:
+            items.insert(0, model)
+        self.model_box.clear()
+        if items:
+            self.model_box.addItems(items)
+        self.model_box.setCurrentText(model)
+
+    def _on_provider_changed(self, name: str):
+        # 切换预设时,如果 url/key 为空就自动填默认值;非空保留用户已有的(避免
+        # 误点下拉把已配置的 base_url 抹了)
+        url_default, model_default = self._presets.get(name, ("", ""))
+        if url_default and not self.url_edit.text().strip():
+            self.url_edit.setText(url_default)
+        if model_default:
+            # 仅当当前模型框是空 或 模型还不在已知列表里时,顺手填一个默认
+            cur = self.model_box.currentText().strip()
+            if not cur:
+                if model_default not in [self.model_box.itemText(i)
+                                          for i in range(self.model_box.count())]:
+                    self.model_box.addItem(model_default)
+                self.model_box.setCurrentText(model_default)
+
+    def _on_save(self):
+        provider = self.provider_box.currentText().strip()
+        base_url = self.url_edit.text().strip()
+        api_key = self.key_edit.text().strip()
+        model = self.model_box.currentText().strip()
+
+        if not base_url:
+            InfoBar.warning("保存失败", "Base URL 不能为空",
+                            parent=self.window(), duration=3000)
+            return
+        if not model:
+            InfoBar.warning("保存失败", "请选择或填写模型名",
+                            parent=self.window(), duration=3000)
+            return
+
+        set_field("llm_chat.provider", provider)
+        set_field("llm_chat.base_url", base_url)
+        set_field("llm_chat.api_key", api_key)
+        set_field("llm_chat.model", model)
+        info(f"[settings] LLM 配置已保存 provider={provider} model={model}")
+        InfoBar.success("已保存", "LLM 配置已写入 configs/config.json",
+                        parent=self.window(), duration=2500)
+
+    # ── 拉取模型 ─────────────────────────────────────────────────────────
+    def _on_fetch_models(self):
+        if self._model_worker is not None and self._model_worker.isRunning():
+            return  # 防抖:正在拉就忽略
+        base_url = self.url_edit.text().strip()
+        if not base_url:
+            InfoBar.warning("无法拉取", "请先填写 Base URL",
+                            parent=self.window(), duration=3000)
+            return
+
+        api_key = self.key_edit.text().strip()
+        self.fetch_btn.setEnabled(False)
+        self.fetch_btn.setText("拉取中…")
+
+        self._model_worker = self._ModelListWorker(api_key, base_url, self)
+        self._model_worker.finished_list.connect(self._on_fetch_ok)
+        self._model_worker.error.connect(self._on_fetch_err)
+        self._model_worker.finished.connect(self._reset_fetch_btn)
+        self._model_worker.start()
+
+    def _reset_fetch_btn(self):
+        self.fetch_btn.setEnabled(True)
+        self.fetch_btn.setText("拉取模型")
+
+    def _on_fetch_ok(self, ids: list):
+        cur = self.model_box.currentText().strip()
+        self.model_box.clear()
+        self.model_box.addItems(ids)
+        # 拉取后保留用户原先选中的 model 作为当前值(它可能还在列表里;不在
+        # 列表也允许用户继续用,EditableComboBox 允许任意输入)
+        if cur:
+            self.model_box.setCurrentText(cur)
+        # 同时缓存到 config,下次打开设置页直接显示
+        set_field("llm_chat.models", ids)
+        InfoBar.success("拉取成功",
+                        f"获取到 {len(ids)} 个模型",
+                        parent=self.window(), duration=2500)
+
+    def _on_fetch_err(self, msg: str):
+        InfoBar.error("拉取失败", msg[:200],
+                      parent=self.window(), duration=5000)
+
+
 class SettingsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.setObjectName("settingsInterface")
-        layout = QVBoxLayout(self)
+
+        # 外层布局只放一个滚动容器, 不要再直接放卡片。
+        # InstallPyTorchCard 开始装 torch 时 terminal_widget 从 0 撑到 200+ px,
+        # 没有滚动容器时整页超出 FluentWindow 的可视高度,Qt 会把下方 MaterialsAccountCard
+        # 挤到 install 卡上方,视觉上就是"飞上来重叠"。套 SingleDirectionScrollArea
+        # 后超出部分变滚动条,布局不会再溢出。
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = SingleDirectionScrollArea(self, orient=Qt.Orientation.Vertical)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea{background:transparent;border:none}")
+        scroll.viewport().setStyleSheet("background:transparent")
+
+        content = QWidget(scroll)
+        content.setStyleSheet("background:transparent")
+        layout = QVBoxLayout(content)
         layout.setSpacing(12)
         layout.setContentsMargins(30, 30, 30, 30)
 
-        self.installer = InstallPyTorchCard(self)
+        self.installer = InstallPyTorchCard(content)
         layout.addWidget(self.installer)
 
-        self.materials_card = MaterialsAccountCard(self)
+        self.materials_card = MaterialsAccountCard(content)
         layout.addWidget(self.materials_card)
 
+        self.llm_card = LLMConfigCard(content)
+        layout.addWidget(self.llm_card)
+
         layout.addStretch()
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll)

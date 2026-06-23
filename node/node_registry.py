@@ -73,6 +73,7 @@ CATEGORY_COLORS = {
     "基础节点":   "#555555",
     "音频":      "#0078D4",
     "图像/视频": "#0DB37E",
+    "LLM":       "#F7B731",
 }
 
 
@@ -212,6 +213,70 @@ _reg(NodeDef(
     title="文本注释",
     category="基础节点",
     params={"text": "注释内容…"},
+))
+
+# ── LLM 节点 ──────────────────────────────────────────────────────────
+
+# 内置系统提示词模板 —— LLMPromptExec 按 template 取对应 system content
+# 留空 = 无 system message 直接走用户 prompt
+LLM_SYSTEM_TEMPLATES: dict[str, str] = {
+    "自定义": "",
+    "MusicGen 音乐生成": (
+        "你是 MusicGen 提示词工程师。把用户的中文创意转写成一句**英文** "
+        "MusicGen prompt 输出。只描述音乐本身:乐器编制、风格流派、情绪、"
+        "节奏与速度 (BPM)、年代或地域风格。不要 quote 任何歌词、不要附加任何"
+        "解释或前后缀,直接给一行英文。"
+    ),
+    "AudioGen 音效生成": (
+        "你是 AudioGen 音效提示词工程师。把用户的中文场景转写成一句**英文** "
+        "AudioGen prompt 输出。只描述声场:声源、环境、空间感、动态变化。"
+        "不要带任何旋律或调性,不要解释,直接给一行英文。"
+    ),
+    "文案/广告": (
+        "你是中文文案撰稿人。按用户给出的产品/主题输出一段简短、有节奏的中文"
+        "广告文案,30~80 字,带一句钩子开头,不堆砌形容词。"
+    ),
+    "字幕翻译": (
+        "你是字幕翻译。把用户给的字幕原文译成自然的中文,逐行对齐,**保留时间戳**"
+        "和编号格式 (SRT/VTT 等)。除翻译外不要加任何解释。"
+    ),
+    "视频脚本": (
+        "你是短视频编导。按用户主题输出 60 秒内的中文脚本:用 [镜头]/[旁白]/"
+        "[字幕] 三类标签分段,每段 1 行,信息密度大、口语化。"
+    ),
+    "图像生成提示词 (SD/MJ)": (
+        "你是图像生成提示词工程师。把用户的中文意象转写成一句**英文** Stable "
+        "Diffusion / Midjourney prompt:主体、风格、构图、光线、画幅、画质修饰词,"
+        "用半角逗号分隔。不要解释,直接给一行英文。"
+    ),
+}
+
+_reg(NodeDef(
+    id="llm_prompt",
+    title="LLM 提示词生成",
+    category="LLM",
+    # 端口接 text_input 等可拼到用户提示词后面 (作为额外上下文)
+    inputs=[
+        PortDef("context_in", "上下文（可选）", "text"),
+    ],
+    outputs=[
+        PortDef("text_out", "生成文本", "text"),
+    ],
+    params={
+        # template 走 param_choices 渲染成下拉框 选定后 Executor 拼对应 system prompt
+        "template":    "自定义",
+        # 多行 (prompt 在 _MULTILINE_TEXT_PARAM_KEYS 里)
+        "prompt":      "",
+        "temperature": 0.7,
+        # 留空 = 用 config.llm_chat.* (设置页配的那一份);
+        # 填了 = 仅本节点用 不会写回 config.json
+        "model":       "",
+        "base_url":    "",
+        "api_key":     "",
+    },
+    param_choices={
+        "template": list(LLM_SYSTEM_TEMPLATES.keys()),
+    },
 ))
 
 # ── 音频节点 ──────────────────────────────────────────────────────────
@@ -402,6 +467,38 @@ _reg(NodeDef(
                             "按中文句号。切", "按英文句号.切",
                             "按标点符号切"],
         "format":          ["wav", "flac"],
+    },
+))
+
+_reg(NodeDef(
+    id="audiocraft",
+    title="AudioCraft 音乐/音效生成",
+    category="音频",
+    # 端口接 LLM 提示词节点可直接驱动;端口没接时回退到 prompt 参数
+    inputs=[
+        PortDef("prompt_in", "提示词（可选）", "text"),
+    ],
+    outputs=[
+        PortDef("audio_out", "生成音频", "audio"),
+    ],
+    params={
+        # task=musicgen 时 model 取 small/medium/large/melody
+        # task=audiogen 时 model 取 medium (facebook 当前只发了 medium)
+        "task":          "musicgen",
+        "model":         "small",
+        "device":        "cpu",
+        # prompt 在 _MULTILINE_TEXT_PARAM_KEYS 里 自动渲染为多行
+        "prompt":        "",
+        "duration":      10.0,
+        "temperature":   1.0,
+        "top_k":         250,
+        "cfg_coef":      3.0,
+        "output_format": "wav",
+    },
+    param_choices={
+        "task":          ["musicgen", "audiogen"],
+        "model":         ["small", "medium", "large", "melody"],
+        "output_format": ["wav", "mp3"],
     },
 ))
 

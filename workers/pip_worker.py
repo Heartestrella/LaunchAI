@@ -936,18 +936,24 @@ else:
             # Step 2: 过滤掉 torch* (按项目惯例,torch 由用户在设置里装)
             if os.path.exists(req_file):
                 self._filter_torch_requirements(req_file)
-                # pesq 在 Windows 上 PyPI 没有预编译 wheel,源码构建要 MSVC + Cython,
-                # 本地装不上。好在 LaunchAI 只跑 MusicGen / AudioGen 推理:
-                #   - audiocraft/metrics/__init__.py 没引出 PesqMetric,import audiocraft
-                #     不会触发 import pesq
-                #   - pesq 只在 metrics/pesq.py(语音质量评估)和 solvers/watermark.py
-                #     (水印训练 solver)里 import,推理路径完全走不到
-                # 直接从 requirements 剥掉,源码保持原样不动。
-                removed = self._strip_requirements(req_file, ("pesq",))
+                # _filter_torch_requirements 只精确剥 torch/torchvision/torchaudio,
+                # 下面这几个名字带 torch 字串或者 torch transitive 约束的依赖必须额外处理,
+                # 否则 pip resolver 会把已装好的 CUDA torch 强制回滚成 PyPI 默认的 CPU 版:
+                #   - torchtext==0.16.0: 钉死 torch>=2.1.0,<2.2.0,
+                #     而 2.1.0+cu124 不在默认 PyPI 索引上,pip 拿到的就是 CPU 2.1.0;
+                #     全仓库 grep `import torchtext` 0 命中,纯死代码,直接剥
+                #   - xformers<0.0.23: 0.0.22.post7 钉死 torch==2.0.1,雪上加霜;
+                #     但 audiocraft/modules/transformer.py 顶层 `from xformers import ops`
+                #     必须有,所以这里剥掉旧版约束,Step 6 用 --no-deps 单装新版
+                #   - pesq: Windows 上 PyPI 没有预编译 wheel,源码构建要 MSVC + Cython;
+                #     只在 metrics/pesq.py 和 solvers/watermark.py 里 import,
+                #     LaunchAI 只跑 MusicGen / AudioGen 推理,路径完全走不到
+                removed = self._strip_requirements(
+                    req_file, ("pesq", "torchtext", "xformers"))
                 if removed:
                     self.output_signal.emit(self._html(
-                        "已从 requirements 移除: pesq "
-                        "(Windows 无 wheel;只影响训练/水印 solver,推理不需要)",
+                        f"已从 requirements 移除: {', '.join(removed)} "
+                        "(torchtext/xformers 会把 CUDA torch 拖成 CPU;pesq 无 wheel)",
                         "#4FC3F7"))
 
             # Step 3: 先单独装一个 wheel 可用的 av (强制 only-binary,
@@ -976,6 +982,24 @@ else:
             if not ok_pkg and not self._is_cancelled:
                 self.finished_signal.emit(False, "audiocraft 本体安装失败")
                 return None
+
+            # Step 6: 按当前 torch 主.次版本挑 ABI 匹配的 xformers wheel,
+            # --no-deps 单装,防止 pip 顺手把 torch 一起换掉。
+            # 不能直接 `pip install xformers --no-deps`——pip 默认抓最新版,
+            # 而 xformers 的 C++/CUDA 扩展是按 torch 版本编译的,装错版本会:
+            #   WARNING[XFORMERS]: xFormers can't load C++/CUDA extensions
+            #   ImportError: cannot import name 'GroupName' from
+            #                torch.distributed.distributed_c10d (新 xformers
+            #                引用了只有新 torch 才有的符号)
+            # 而 audiocraft transformer.py 顶层就是 `from xformers import ops`,
+            # 不装或装错都会让 import audiocraft 直接挂掉。
+            ok_xf = self._install_xformers_matching_torch()
+            if not ok_xf and not self._is_cancelled:
+                self.output_signal.emit(self._html(
+                    "⚠️ xformers 安装失败,audiocraft import 会报错。"
+                    "可在确认 torch 版本后手动执行 "
+                    "`pip install xformers==<对应版本> --no-deps`",
+                    "#FF9800"))
 
             self._emit_install_finished(package)
             return None
@@ -1121,6 +1145,73 @@ else:
         process.wait()
         self._current_proc = None
         return (not self._is_cancelled) and process.returncode == 0
+
+    # torch 主.次 → xformers wheel 版本。数据源:每个 xformers release 的
+    # PyPI install_requires 里都钉死了 `torch==X.Y.Z`,这里取对应那一版。
+    # 装错会触发 ImportError: cannot import name 'GroupName' from
+    # torch.distributed.distributed_c10d (新 xformers 引用了只有新 torch
+    # 才有的符号),或者 xFormers C++ 扩展加载失败的 WARNING。
+    _XFORMERS_FOR_TORCH = {
+        "2.0": "0.0.22.post7",
+        "2.1": "0.0.23.post1",
+        "2.2": "0.0.25.post1",
+        "2.3": "0.0.27",
+        "2.4": "0.0.28",
+        "2.5": "0.0.28.post3",
+        "2.6": "0.0.29.post2",
+        "2.7": "0.0.31",
+        "2.8": "0.0.32.post2",
+        "2.9": "0.0.33",
+    }
+
+    def _install_xformers_matching_torch(self) -> bool:
+        """读当前 torch 版本 + CUDA 后缀,装 ABI 匹配的 xformers wheel(--no-deps)。
+
+        清华/阿里镜像对 xformers 老版本只有 sdist,没 win wheel,pip 回退
+        源码编译会因 Windows 长路径限制 + 没装 MSVC 直接挂掉,所以
+        --index-url 钉死 PyTorch 官方源(每个 torch+cu 都有预编译 wheel),
+        并加 --only-binary=:all: 强制只用 wheel,绝不走源码构建。
+        """
+        # 1. 读 torch 主.次 + CUDA 后缀
+        try:
+            result = subprocess.run(
+                [PYTHON_PATH, "-c",
+                 "import torch,sys;raw=torch.__version__;"
+                 "ver,_,cu=raw.partition('+');"
+                 "sys.stdout.write('.'.join(ver.split('.')[:2])+'|'+(cu or 'cpu'))"],
+                capture_output=True, text=True, timeout=10,
+                encoding='utf-8', errors='replace'
+            )
+            out = (result.stdout or "").strip()
+            if result.returncode != 0 or "|" not in out:
+                self.output_signal.emit(self._html(
+                    "⚠️ 无法读取 torch 版本,跳过 xformers 自动安装", "#FF9800"))
+                return False
+            torch_minor, cu_tag = out.split("|", 1)
+        except Exception as e:
+            self.output_signal.emit(self._html(
+                f"⚠️ 读取 torch 版本失败({e}),跳过 xformers 自动安装", "#FF9800"))
+            return False
+
+        # 2. 找匹配的 xformers 版本
+        xf_ver = self._XFORMERS_FOR_TORCH.get(torch_minor)
+        if not xf_ver:
+            self.output_signal.emit(self._html(
+                f"⚠️ 未给 torch {torch_minor} 预置 xformers 映射,跳过自动安装。"
+                f"请手动: pip install xformers==<对应版本> --no-deps "
+                f"--index-url https://download.pytorch.org/whl/{cu_tag}",
+                "#FF9800"))
+            return False
+
+        # 3. 装 (PyTorch 官方源 + only-binary, 绝不走 sdist 编译)
+        index_url = f"https://download.pytorch.org/whl/{cu_tag}"
+        self.output_signal.emit(self._html(
+            f"按 torch {torch_minor}+{cu_tag} 匹配 xformers {xf_ver},"
+            f"从 {index_url} 安装...", "#4FC3F7"))
+        return self._run_pip_install([
+            f"xformers=={xf_ver}", "--no-deps", "--force-reinstall",
+            "--only-binary=:all:", "--index-url", index_url,
+        ])
 
     def _kill_proc(self, proc):
         """优雅终止 subprocess：先 terminate，5s 不退强 kill"""

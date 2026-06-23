@@ -116,6 +116,9 @@ class AudiocraftWorker(QThread):
             env = _paths.subprocess_env(hf_home=_paths.model_dir("audiocraft"))
             # encodec / xformers 在 Windows 上有时候吐 utf-8 之外的字节，强制兜底
             env.setdefault("PYTHONIOENCODING", "utf-8")
+            # 子进程 stdout 被 PIPE 后默认是块缓冲，下载阶段的 [download] 行会卡在
+            # 缓冲区里直到模型加载完才一次性吐出来 —— 关掉缓冲让进度实时可见
+            env["PYTHONUNBUFFERED"] = "1"
 
             self.process = subprocess.Popen(
                 cmd,
@@ -169,6 +172,19 @@ class AudiocraftWorker(QThread):
             pct = int(m.group(3)) if m.group(3) else int(cur * 100 / total)
             pct = max(0, min(100, pct))
             self.progress.emit(pct, f"生成中 {cur}/{total} ({pct}%)")
+            return
+
+        if line.startswith("[download]"):
+            # 包含 "下载进度" 让 LogTextEdit 把同一文件的多行折叠成一行原地刷新
+            # （参见 widgets/subpage/subpage_switch_pages.py 里 LogTextEdit 的渲染逻辑）
+            payload = line[len("[download]"):].strip()
+            self.output.emit(_html(f"下载进度 {payload}", "#2196F3"))
+            # 同时抽出 pct 走 progress 信号:LLM 路径下 ToolCallCard 只接 progress,
+            # 不接 output,如果不在这里发一遍,下载阶段在 LLM 卡片上是静默的。
+            # GUI 路径会拿到「下载 0~100% → 生成 0~100%」两段,因为下载先于生成串行。
+            m = re.search(r"\((\d+)%\)", payload)
+            if m:
+                self.progress.emit(int(m.group(1)), f"下载模型 · {payload}")
             return
 
         if line.startswith("[runner][ERROR]"):

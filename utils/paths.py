@@ -57,6 +57,12 @@ _MODEL_TOOL_DIRS: dict[str, str] = {
     "yolo":       "yolo",
     "iopaint":    "iopaint",
     "audiocraft": "audiocraft",
+    # ── 用户自抓的角色/语音模型 由「找模型」页面写入 ──
+    # RVC 模型一般成对出现 .pth + .index 直接放 data/models/rvc/<name>/
+    "rvc":        "rvc",
+    # GPT-SoVITS 一份 .ckpt + 一份 .pth(SoVITS) + 可选参考音频/.list
+    # 放 data/models/gptsovits/<name>/
+    "gptsovits":  "gptsovits",
 }
 
 

@@ -28,6 +28,95 @@ def _say(line: str) -> None:
     sys.stdout.flush()
 
 
+def _fmt_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{int(n)}B"
+        n /= 1024
+    return f"{n:.1f}GB"
+
+
+def _fmt_speed(bps: float) -> str:
+    # bytes/s -> 人类可读
+    if bps <= 0:
+        return "--"
+    return f"{_fmt_bytes(bps)}/s"
+
+
+def _install_hf_download_progress_hook() -> None:
+    """劫持 huggingface_hub 的 tqdm,把下载进度转成 [download] 行打到 stdout。
+
+    huggingface_hub.file_download 在模块顶层 `from .utils import tqdm`,该 tqdm
+    继承自 tqdm.auto.tqdm。我们用一个子类覆盖 display(),不调用父类 —— 这样
+    既不会把 \\r 进度条写到 stderr,又能在每次刷新时把当前字节数转成行输出,
+    被父进程的 readline 循环按行收到。
+
+    必须在 import audiocraft 之前调用,否则 audiocraft.models.loaders 那边已经
+    通过 `from huggingface_hub import hf_hub_download` 绑定了旧引用。
+
+    限频 ~5Hz,完成时强制再发一次以保证最后状态可见。
+    """
+    try:
+        import importlib
+        # huggingface_hub.utils.__init__ 把子模块 `tqdm` 用 `from .tqdm import tqdm`
+        # 覆盖成了类引用,直接 `import huggingface_hub.utils.tqdm` 会拿到类而不是
+        # 模块。用 importlib 强制按完整路径解析子模块。
+        _hf_tqdm_mod = importlib.import_module("huggingface_hub.utils.tqdm")
+        import huggingface_hub.file_download as _hf_fd
+    except Exception:
+        return
+
+    base = _hf_tqdm_mod.tqdm
+
+    class _HookedTqdm(base):
+        _last_emit: dict = {}
+
+        def __init__(self, *args, **kwargs):
+            # huggingface_hub.file_download 默认传 disable=None,tqdm 在非 TTY 环境
+            # (subprocess + PIPE)下会自动把 None 解释为 True,导致 update/refresh/
+            # display 全部短路 —— 我们 override 的 display 永远不会被调到。强制
+            # disable=False 让 tqdm 内部的进度循环正常跑,display 接管输出。
+            kwargs["disable"] = False
+            # tqdm 的 clear() 等方法会通过 self.fp 写控制字符,塞到 StringIO 黑洞里,
+            # 既不污染 stdout,也不会泄漏 fd。display 已 override 不会用到 fp,
+            # 所以这只兜底 tqdm 内部的边角写入。
+            if "file" not in kwargs:
+                import io
+                kwargs["file"] = io.StringIO()
+            super().__init__(*args, **kwargs)
+
+        def display(self, msg=None, pos=None):
+            try:
+                key = id(self)
+                now = time.monotonic()
+                total = int(self.total or 0)
+                n = int(self.n or 0)
+                done = total > 0 and n >= total
+                last_t, last_n = _HookedTqdm._last_emit.get(key, (0.0, 0))
+                # 完成或首次必报,中间限频
+                if not done and last_t and (now - last_t) < 0.2:
+                    return None
+                # 瞬时速度:本窗口内增量 / 时间差。首次没有样本就用 -- 占位
+                if last_t and now > last_t:
+                    speed = max(0, n - last_n) / (now - last_t)
+                else:
+                    speed = 0.0
+                _HookedTqdm._last_emit[key] = (now, n)
+                desc = (self.desc or "downloading").strip().strip(":").strip()
+                spd = _fmt_speed(speed)
+                if total > 0:
+                    pct = max(0, min(100, int(n * 100 / total)))
+                    _say(f"[download] {desc} {_fmt_bytes(n)}/{_fmt_bytes(total)} ({pct}%) {spd}")
+                else:
+                    _say(f"[download] {desc} {_fmt_bytes(n)} {spd}")
+            except Exception:
+                pass
+            return None  # 不调用父类 display,避免 tqdm 把 \r 行写到 stderr
+
+    _hf_tqdm_mod.tqdm = _HookedTqdm
+    _hf_fd.tqdm = _HookedTqdm
+
+
 def _parse_device(device: str) -> str:
     """audiocraft 接受 'cuda'/'cuda:N'/'cpu'/'mps' 字符串。"""
     if not device:
@@ -231,6 +320,9 @@ def main() -> int:
     if not args.prompts:
         _say("[runner][ERROR] 至少需要一条非空 --prompt")
         return 2
+
+    # 必须在 audiocraft / huggingface_hub 被 audiocraft.models 拉起来之前 patch tqdm
+    _install_hf_download_progress_hook()
 
     try:
         if args.task == "musicgen":

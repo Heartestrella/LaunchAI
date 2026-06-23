@@ -161,6 +161,7 @@ class NodeAudioPreview(PreviewBase):
         self._CHUNK = 2048
         self._seek_dragging: bool = False
         self._paused_for_seek: bool = False
+        self._tmp_wav: str | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
@@ -207,8 +208,19 @@ class NodeAudioPreview(PreviewBase):
     def _load(self, path: str):
         if not HAS_SF:
             return
+        # libsndfile 不支持 AAC/m4a (B站音频流) 老版本也不支持 mp3
+        # sf.read 失败时用 ffmpeg 转 16-bit PCM wav 落到临时文件再读
+        read_path = path
         try:
-            data, sr = sf.read(path, dtype='float32', always_2d=True)
+            sf.info(path)
+        except Exception:
+            decoded = self._decode_via_ffmpeg(path)
+            if not decoded:
+                return
+            self._tmp_wav = decoded
+            read_path = decoded
+        try:
+            data, sr = sf.read(read_path, dtype='float32', always_2d=True)
             mono = data.mean(axis=1)
             self._file_data = mono
             self._file_sr = sr
@@ -333,10 +345,47 @@ class NodeAudioPreview(PreviewBase):
         outdata[:, 0] = self._file_data[self._file_pos:end]
         self._file_pos = end
 
+    def _decode_via_ffmpeg(self, src: str) -> str | None:
+        try:
+            from utils.atool import resource_path
+            ffmpeg = os.path.join(resource_path(
+                os.path.join("resource", "ffmepg", "bin")), "ffmpeg.exe")
+            if not os.path.isfile(ffmpeg):
+                ffmpeg = "ffmpeg"
+        except Exception:
+            ffmpeg = "ffmpeg"
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
+        try:
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", src,
+                 "-vn", "-ac", "1", "-ar", "44100",
+                 "-c:a", "pcm_s16le", tmp.name],
+                capture_output=True, timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW
+                if os.name == "nt" else 0,
+            )
+            if r.returncode == 0 and os.path.getsize(tmp.name) > 0:
+                return tmp.name
+        except Exception:
+            pass
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        return None
+
     def cleanup(self):
         self._stop()
         self._close_stream()
         self._play_timer.stop()
+        if self._tmp_wav and os.path.isfile(self._tmp_wav):
+            try:
+                os.unlink(self._tmp_wav)
+            except OSError:
+                pass
+            self._tmp_wav = None
 
 
 # ══════════════════════════════════════════════════════════════════════

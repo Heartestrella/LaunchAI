@@ -127,6 +127,13 @@ _PARAM_LABELS_CN = {
     "note":            "备注",
     "description":     "描述",
     "prompt":          "提示词",
+    # ── LLM 提示词节点 / AudioCraft ──────────────────────────────
+    "template":        "系统提示词模板",
+    "base_url":        "服务地址 (覆盖,不保存)",
+    "api_key":         "API Key (覆盖,不保存)",
+    "duration":        "时长 (秒)",
+    "cfg_coef":        "CFG 引导系数",
+    "output_format":   "输出格式",
 }
 
 
