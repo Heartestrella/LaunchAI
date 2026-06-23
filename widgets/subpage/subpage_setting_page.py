@@ -207,49 +207,63 @@ class InstallPyTorchCard(ElevatedCardWidget):
     def start_install(self, cuda_ver: int, mirror: str):
         """开始安装 PyTorch"""
         info(f"开始安装 - CUDA: {cuda_ver}, 镜像源: {mirror}")
+        # 防止重复点击启动多个 worker(原 bug:worker 是局部变量,二次点击会再启一个)
+        existing = getattr(self, 'worker', None)
+        if existing is not None and existing.isRunning():
+            warning("已有安装任务在运行,忽略本次启动请求")
+            return
         base_mirror_url = MIRROR_MAP.get(mirror, None)
         mirror_url = f"{base_mirror_url}/cu{cuda_ver}"
         packages = ["torch", "torchvision", "torchaudio"]
         if int(cuda_ver) == 132:
             packages.remove("torchaudio")
-        worker = PipWorker(packages, mirror_url,
-                           is_torch=cuda_ver, force=self.reinstall)
-        worker.output_signal.connect(self.terminal_text.append_colored)
-        worker.finished_signal.connect(self.on_install_finished)
+        # 必须挂到 self 上,否则函数返回后局部 worker 被回收,
+        # 触发 "QThread: Destroyed while thread is still running"
+        self.worker = PipWorker(packages, mirror_url,
+                                is_torch=cuda_ver, force=self.reinstall)
+        self.worker.output_signal.connect(self.terminal_text.append_colored)
+        self.worker.finished_signal.connect(self.on_install_finished)
 
-        worker.start()
+        self.worker.start()
         # 显示终端并改变按钮
         self.terminal_widget.setVisible(True)
         self.install_btn.setText("取消")
-        self.install_btn.disconnect()
+        try:
+            self.install_btn.clicked.disconnect()
+        except TypeError:
+            pass
         self.install_btn.clicked.connect(self.cancel_install)
-        self.terminal_widget.setVisible(True)
 
     def cancel_install(self):
-        """取消安装"""
-        if hasattr(self, 'worker') and self.worker.isRunning():
-            self.worker.terminate()
-            self.worker.wait()
-            self.worker = None
-
-        if self.install_btn:
-            self.install_btn.setText("安装")
-            try:
-                self.install_btn.clicked.disconnect()
-            except:
-                pass
-            self.install_btn.clicked.connect(self.on_install_clicked)
-            self.install_btn.setEnabled(True)
-
-        self.on_install_finished(False, "用户取消安装")
+        """取消安装:让 PipWorker 自己 kill 子进程并发 finished_signal,UI 在 on_install_finished 复位"""
+        worker = getattr(self, 'worker', None)
+        if worker is not None and worker.isRunning():
+            # PipWorker.cancel() 会终止当前 subprocess 并最终发 finished_signal("已取消安装")
+            worker.cancel()
+            self.install_btn.setEnabled(False)
+            self.install_btn.setText("正在终止...")
+        else:
+            # 没有运行中的安装,直接复位 UI
+            self.on_install_finished(False, "用户取消安装")
 
     def on_install_finished(self, success, message):
         """安装完成"""
 
         self.install_btn.setText("安装")
-        self.install_btn.disconnect()
+        try:
+            self.install_btn.clicked.disconnect()
+        except TypeError:
+            pass
         self.install_btn.clicked.connect(self.on_install_clicked)
         self.install_btn.setEnabled(True)
+
+        # 释放 worker 引用:此时线程已结束(finished_signal 在 run() 返回前发出),
+        # QThread 析构安全
+        worker = getattr(self, 'worker', None)
+        if worker is not None:
+            if worker.isRunning():
+                worker.wait(3000)
+            self.worker = None
 
         if success:
             InfoBar.success("安装成功", message,
@@ -268,7 +282,7 @@ class InstallPyTorchCard(ElevatedCardWidget):
 
 class _UserInfoWorker(QThread):
     """异步拉两个平台的用户信息 避免阻塞 settings 页面渲染"""
-    netease  = pyqtSignal(object)   # dict | None
+    netease = pyqtSignal(object)   # dict | None
     bilibili = pyqtSignal(object)
 
     def run(self):
@@ -354,7 +368,8 @@ class MaterialsAccountCard(ElevatedCardWidget):
     def _refresh(self):
         # 没 cookie 时直接显示未登录 不发请求
         for key, _name, _ic in self.PLATFORMS:
-            has_cookie = bool((get_field(f"materials.{key}_cookie", "") or "").strip())
+            has_cookie = bool(
+                (get_field(f"materials.{key}_cookie", "") or "").strip())
             r = self._rows[key]
             if not has_cookie:
                 r["status"].setText("未登录")
@@ -375,7 +390,8 @@ class MaterialsAccountCard(ElevatedCardWidget):
         r = self._rows[key]
         if data is None:
             # 有 cookie 但拉不到信息 = cookie 失效
-            has_cookie = bool((get_field(f"materials.{key}_cookie", "") or "").strip())
+            has_cookie = bool(
+                (get_field(f"materials.{key}_cookie", "") or "").strip())
             if has_cookie:
                 r["status"].setText("⚠️ 登录已失效 请重新登录")
                 r["login"].setVisible(True)
@@ -559,7 +575,7 @@ class LLMConfigCard(ElevatedCardWidget):
             cur = self.model_box.currentText().strip()
             if not cur:
                 if model_default not in [self.model_box.itemText(i)
-                                          for i in range(self.model_box.count())]:
+                                         for i in range(self.model_box.count())]:
                     self.model_box.addItem(model_default)
                 self.model_box.setCurrentText(model_default)
 
@@ -643,7 +659,8 @@ class SettingsWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        scroll = SingleDirectionScrollArea(self, orient=Qt.Orientation.Vertical)
+        scroll = SingleDirectionScrollArea(
+            self, orient=Qt.Orientation.Vertical)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none}")
@@ -655,14 +672,14 @@ class SettingsWidget(QWidget):
         layout.setSpacing(12)
         layout.setContentsMargins(30, 30, 30, 30)
 
-        self.installer = InstallPyTorchCard(content)
-        layout.addWidget(self.installer)
-
         self.materials_card = MaterialsAccountCard(content)
         layout.addWidget(self.materials_card)
 
         self.llm_card = LLMConfigCard(content)
         layout.addWidget(self.llm_card)
+
+        self.installer = InstallPyTorchCard(content)
+        layout.addWidget(self.installer)
 
         layout.addStretch()
 

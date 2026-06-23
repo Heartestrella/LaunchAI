@@ -389,13 +389,11 @@ _reg(NodeDef(
         "format":        "wav",
     },
     param_choices={
-        # Applio 3.6+ 的合法值（旧版的 rmvpe+/pm/harvest 已被移除
-        # 老存档里若是这几个,会被 _rvc_runner._normalize_f0 自动映射成 rmvpe）
-        "f0_method": [
-            "rmvpe", "crepe", "crepe-tiny", "fcpe",
-            "hybrid[crepe+rmvpe]", "hybrid[crepe+fcpe]",
-            "hybrid[rmvpe+fcpe]", "hybrid[crepe+rmvpe+fcpe]",
-        ],
+        # Applio 3.6+ 的合法值（旧版的 rmvpe+/pm/harvest 以及 hybrid[*] 系列
+        # 都已在 pipeline.py 中失效——CLI 接受但 get_f0 未实现，会抛
+        # UnboundLocalError。老存档里若是这几个，会被 _rvc_runner._normalize_f0
+        # 自动映射成 rmvpe）
+        "f0_method": ["rmvpe", "crepe", "crepe-tiny", "fcpe"],
         "format":    ["wav", "mp3", "flac"],
     },
 ))
