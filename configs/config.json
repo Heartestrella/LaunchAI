@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 {
   "static_info": {
     "cpu_name": "AMD Ryzen 5 5600X 6-Core Processor",
@@ -779,3 +780,6 @@
     ]
   }
 }
+=======
+{}
+>>>>>>> 5f2a325d8abe934c66d4d7a6800ab5e65e31284e
