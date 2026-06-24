@@ -1,0 +1,46 @@
+# audiocraft (facebookresearch/audiocraft @ fork_map main)
+# pip_worker.py:902-1005 流程:
+#   1. 把 setup.py / requirements.txt / setup.cfg / pyproject.toml 里
+#      `av==11.0.0` 全部放宽成 `av>=11.0.0` (该版本已从 PyPI yank)
+#   2. _filter_torch_requirements 剥 torch*
+#   3. _strip_requirements 剥 (pesq, torchtext, xformers)
+#      - pesq:     win-py311 没 wheel,源码构建要 MSVC + Cython,推理路径走不到
+#      - torchtext: 钉死 torch>=2.1.0,<2.2.0,会把 CUDA torch 拖成 CPU
+#      - xformers: 这里剥旧版约束,步骤 6 单独装匹配 torch 版本的新 xformers
+#   4. pip install av --only-binary=:all:  (跳过 av==11 的源码构建)
+#   5. pip install -r requirements.txt  (装其余依赖)
+#   6. pip install <project_root>  (装 audiocraft 本体)
+#   7. pip install xformers==<匹配 torch 版本> --no-deps
+#
+# 这里 lock 的就是步骤 4/5/7 的顶层包。
+
+av==17.1.0
+einops==0.8.2
+flashy==0.0.2
+hydra-core==1.3.3
+hydra-colorlog==1.2.0
+julius==0.2.8
+num2words==0.5.14
+# numpy 锁到 1.26.4 而不是 freeze 时的 2.4.6 —— numba 0.63 的 numpy 上限
+# 是 2.3,whisper 走 numba,必须保证 audiocraft 装完不把 numpy 顶过 2.3。
+# audiocraft 本体没硬钉 numpy>=2,1.26.4 经 py311 实测可跑(见根目录 py311)。
+# 这一行必须与 whisper.txt / applio.txt / gptsovits.txt 同步。
+numpy==1.26.4
+sentencepiece==0.2.1
+spacy==3.7.6
+huggingface-hub==0.36.2
+tqdm==4.68.3
+transformers==4.44.2
+librosa==0.10.2
+soundfile==0.12.1
+gradio==4.44.1
+torchmetrics==1.5.0
+encodec==0.1.1
+protobuf==7.35.1
+pystoi==0.4.1
+torchdiffeq==0.2.5
+
+# xformers 不放在本文件 —— 它必须 --no-deps 安装,否则 pip 会把
+# 已装好的 torch 2.5.1+cu124 顶成 PyPI 默认的 CPU 版。
+# pip_worker._install_xformers_matching_torch() 会按当前 torch 版本
+# 从 PyTorch 官方源装匹配的 wheel(对 torch 2.5 而言是 0.0.28.post3)。

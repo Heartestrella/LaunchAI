@@ -498,3 +498,75 @@ class SwitchPage(QWidget):
             self.switch_page(0)
         else:
             self.switch_page(1)
+
+
+class LazySwitchPage(QWidget):
+    """SwitchPage 的懒加载包装。
+
+    构造时只放一个 "正在加载…" 占位,直到首次 showEvent 触发后,才在主线程
+    构造真正的 SwitchPage(连带 NoInstallWidget / 各推理子页面)。
+    这样把 audio / image 八个工具页的 import 与 widget 构造从启动期推迟到
+    用户真正点开那一刻。
+
+    __getattr__ 把外部对真页属性的访问 (例如 app.py 的
+    self.demucsinterface._real_page_1.set_progress(...)) 透传到 self._real。
+    那些回调只会在用户已经看过这个页(从而触发了构造)之后才被点起,所以
+    访问发生时 _real 必然已就绪。
+    """
+
+    def __init__(self, page_name: str, device_options: dict, parent=None):
+        super().__init__(parent=parent)
+        self._page_name = page_name
+        self._device_options = device_options
+        self._parent_window = parent
+        self._real = None
+        # 与 SwitchPage 一致,FluentWindow 导航靠 objectName 路由
+        self.setObjectName(f"{page_name}Interface")
+
+        self._stack = QStackedLayout(self)
+        self._stack.setContentsMargins(0, 0, 0, 0)
+        self._stack.setSpacing(0)
+
+        self._loading_widget = QWidget(self)
+        ll = QVBoxLayout(self._loading_widget)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.addStretch()
+        lbl = BodyLabel("正在加载…", self._loading_widget)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ll.addWidget(lbl)
+        ll.addStretch()
+        self._stack.addWidget(self._loading_widget)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._real is None:
+            # singleShot(0) 让本帧先把 "正在加载…" 画出来,下一帧再开始构造,
+            # 否则用户看到的是空白卡顿一下后直接跳到真页,丢失 loading 反馈
+            QTimer.singleShot(0, self._build_real)
+
+    def _build_real(self):
+        if self._real is not None:
+            return
+        info(f"[lazy] 构造 {self._page_name} 真页")
+        self._real = SwitchPage(
+            self._page_name, self._device_options, self._parent_window)
+        self._stack.addWidget(self._real)
+        self._stack.setCurrentWidget(self._real)
+        self._loading_widget.deleteLater()
+        self._loading_widget = None
+
+    def __getattr__(self, name):
+        # __getattr__ 仅在常规属性查找失败时触发。
+        # 自身字段(_real / _page_name 等)在 __init__ 里用 self.xxx = ... 写入,
+        # 走的是 __setattr__,正常 lookup 即可命中,不会回退到此处。
+        # 此处只兜底处理"外部对真页属性的访问"(例如 ._real_page_1)。
+        if name.startswith('__'):
+            # dunder 走默认行为,不要乱转发,避免和 PyQt 内部冲突
+            raise AttributeError(name)
+        real = self.__dict__.get('_real')
+        if real is None:
+            raise AttributeError(
+                f"LazySwitchPage[{self.__dict__.get('_page_name', '?')}] "
+                f"尚未构造完成,无法访问 .{name}"
+            )
+        return getattr(real, name)

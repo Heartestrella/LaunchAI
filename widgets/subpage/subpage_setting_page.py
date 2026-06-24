@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 from PyQt6.QtCore import Qt
 from qfluentwidgets import (
     SettingCard, FluentIcon as FIF, ElevatedCardWidget, TextEdit, ComboBox,
-    EditableComboBox, LineEdit, PasswordLineEdit,
+    EditableComboBox, LineEdit, PasswordLineEdit, SwitchButton,
     PushButton, PrimaryPushButton, ToolTipFilter, IconWidget, MessageBox, InfoBar,
     StrongBodyLabel, BodyLabel, CaptionLabel, SingleDirectionScrollArea,
 )
@@ -645,6 +645,54 @@ class LLMConfigCard(ElevatedCardWidget):
                       parent=self.window(), duration=5000)
 
 
+class LazyStartupCard(ElevatedCardWidget):
+    """启动行为:懒启动开关。
+
+    开启后,audio / image 分组下的工具页(demucs / whisper / rvc / gptsovits /
+    audiocraft / ESRGAN / yolo / iopaint)在启动时只挂占位,首次点开才构造真页;
+    home / 模型对话 / 节点编辑器 / 设置 等仍然饿加载。
+    改动写入 configs/config.json::app.lazy_startup,下次启动生效。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 16, 22, 16)
+        root.setSpacing(10)
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(IconWidget(FIF.SPEED_HIGH, self))
+        head.addWidget(StrongBodyLabel("启动行为", self))
+        head.addStretch()
+        root.addLayout(head)
+
+        root.addWidget(CaptionLabel(
+            "懒启动:开启后,音频 / 图像分组下的八个工具页在启动时只挂占位,"
+            "首次点开会显示「正在加载…」并构造真页。"
+            "适合只用一两个工具的用户。修改后需重启程序生效。", self
+        ))
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(BodyLabel("懒启动", self), 1)
+        self.toggle = SwitchButton(self)
+        self.toggle.setChecked(bool(get_field("app.lazy_startup", False)))
+        self.toggle.checkedChanged.connect(self._on_toggled)
+        row.addWidget(self.toggle)
+        root.addLayout(row)
+
+    def _on_toggled(self, checked: bool):
+        set_field("app.lazy_startup", bool(checked))
+        info(f"[settings] app.lazy_startup → {checked}")
+        InfoBar.success(
+            "已保存",
+            "懒启动设置已更新,下次启动生效。",
+            parent=self.window(),
+            duration=2500,
+        )
+
+
 class SettingsWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -671,6 +719,9 @@ class SettingsWidget(QWidget):
         layout = QVBoxLayout(content)
         layout.setSpacing(12)
         layout.setContentsMargins(30, 30, 30, 30)
+
+        self.lazy_card = LazyStartupCard(content)
+        layout.addWidget(self.lazy_card)
 
         self.materials_card = MaterialsAccountCard(content)
         layout.addWidget(self.materials_card)

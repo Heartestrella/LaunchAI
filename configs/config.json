@@ -142,7 +142,7 @@
               {
                 "iid": "c471aa58",
                 "def_id": "sovits_list_input",
-                "x": -237.09973655034509,
+                "x": -242.1173365503451,
                 "y": 330.65142678385865,
                 "w": 0.0,
                 "h": 0.0,
@@ -172,17 +172,6 @@
                 "h": 0.0,
                 "params": {
                   "path": "D:/sovits_models/486V2.5（8.16）/安和昴V2.5_e100_s2300.pth"
-                }
-              },
-              {
-                "iid": "3c58ee36",
-                "def_id": "text_input",
-                "x": -241.7237602046616,
-                "y": 464.9967967104673,
-                "w": 0.0,
-                "h": 0.0,
-                "params": {
-                  "text": "这是一段测试ですわ ですわ"
                 }
               },
               {
@@ -243,6 +232,22 @@
                 "params": {
                   "text": "原神NB\n"
                 }
+              },
+              {
+                "iid": "c53f3d37",
+                "def_id": "llm_prompt",
+                "x": -233.4221995870501,
+                "y": 467.96906634689424,
+                "w": 0.0,
+                "h": 0.0,
+                "params": {
+                  "template": "自定义",
+                  "prompt": "",
+                  "temperature": 0.7,
+                  "model": "",
+                  "base_url": "",
+                  "api_key": ""
+                }
               }
             ],
             "connections": [
@@ -273,13 +278,6 @@
                 "src_port": "file_out",
                 "dst_iid": "1e21b85a",
                 "dst_port": "sovits_model"
-              },
-              {
-                "cid": "0f5dbe39",
-                "src_iid": "3c58ee36",
-                "src_port": "text_out",
-                "dst_iid": "1e21b85a",
-                "dst_port": "target_text"
               },
               {
                 "cid": "f445ccb0",
@@ -322,6 +320,13 @@
                 "src_port": "transcript",
                 "dst_iid": "d1968abf",
                 "dst_port": "input"
+              },
+              {
+                "cid": "6af7c21f",
+                "src_iid": "c53f3d37",
+                "src_port": "text_out",
+                "dst_iid": "1e21b85a",
+                "dst_port": "target_text"
               }
             ]
           }
@@ -411,7 +416,7 @@
                 "w": 0.0,
                 "h": 0.0,
                 "params": {
-                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\output\\_rvc\\vocals_rvc.wav"
+                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data\\outputs\\rvc_node\\vocals_rvc.wav"
                 }
               },
               {
@@ -434,7 +439,7 @@
                 "w": 0.0,
                 "h": 0.0,
                 "params": {
-                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\output\\_audio_merge\\merged_mix_925ee4a4.wav"
+                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data\\outputs\\node\\audio_merge\\merged_mix_a1b9d3ab.wav"
                 }
               },
               {
@@ -530,74 +535,12 @@
           }
         },
         {
-          "title": "未命名 1",
-          "current_file": null,
-          "dirty": true,
-          "graph": {
-            "version": 1,
-            "nodes": [
-              {
-                "iid": "dcd8aaa8",
-                "def_id": "preview",
-                "x": 554.5,
-                "y": 307.0,
-                "w": 0.0,
-                "h": 0.0,
-                "params": {
-                  "path": "C:\\Users\\Administrator\\Desktop\\LaunchAI\\data\\outputs\\node\\llm_prompt\\llm_396a4b21.txt"
-                }
-              },
-              {
-                "iid": "e9a52caf",
-                "def_id": "llm_prompt",
-                "x": 133.9375,
-                "y": 325.1066176470588,
-                "w": 0.0,
-                "h": 0.0,
-                "params": {
-                  "template": "自定义",
-                  "prompt": "你是谁",
-                  "temperature": 0.7,
-                  "model": "",
-                  "base_url": "",
-                  "api_key": ""
-                }
-              }
-            ],
-            "connections": [
-              {
-                "cid": "1cf8ff1d",
-                "src_iid": "e9a52caf",
-                "src_port": "text_out",
-                "dst_iid": "dcd8aaa8",
-                "dst_port": "input"
-              }
-            ]
-          }
-        },
-        {
           "title": "未命名 2",
           "current_file": null,
           "dirty": true,
           "graph": {
             "version": 1,
             "nodes": [
-              {
-                "iid": "c44008ae",
-                "def_id": "llm_prompt",
-                "x": 103.5936639999999,
-                "y": 270.80799999999994,
-                "w": 0.0,
-                "h": 0.0,
-                "params": {
-                  "template": "自定义",
-                  "prompt": "你cos gbc里的subaru 生成一段撒娇的话 中文 添加气语",
-                  "temperature": 0.7,
-                  "model": "",
-                  "base_url": "",
-                  "api_key": ""
-                }
-              },
               {
                 "iid": "ac7533aa",
                 "def_id": "gptsovits",
@@ -666,6 +609,17 @@
                 "params": {
                   "path": "D:/sovits_models/486V2.5（8.16）/安和昴V2.5-e30.ckpt"
                 }
+              },
+              {
+                "iid": "e68ea8f7",
+                "def_id": "text_input",
+                "x": 98.5,
+                "y": 271.5,
+                "w": 0.0,
+                "h": 0.0,
+                "params": {
+                  "text": "额 这是一期为我写的一个"
+                }
               }
             ],
             "connections": [
@@ -705,8 +659,8 @@
                 "dst_port": "ref_text"
               },
               {
-                "cid": "403bde36",
-                "src_iid": "c44008ae",
+                "cid": "483d2ecc",
+                "src_iid": "e68ea8f7",
                 "src_port": "text_out",
                 "dst_iid": "ac7533aa",
                 "dst_port": "target_text"
@@ -715,7 +669,7 @@
           }
         }
       ],
-      "current_index": 1
+      "current_index": 0
     }
   },
   "paths": {

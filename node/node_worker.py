@@ -115,6 +115,16 @@ class NodeExecutor:
         """
         raise NotImplementedError
 
+    def _require(self, tool_id: str) -> None:
+        """工具底层包 / 仓库就绪检查。未装直接 RuntimeError,
+        引擎会捕获并把中文错误展示到节点上,
+        不让 worker subprocess 的 ModuleNotFoundError 整页 stack 污染流程图。
+        """
+        from utils.tool_ready import check
+        err = check(tool_id)
+        if err:
+            raise RuntimeError(err)
+
 
 _REGISTRY: dict[str, NodeExecutor] = {}
 
@@ -465,6 +475,7 @@ class DemucsExec(NodeExecutor):
     }
 
     def execute(self, ctx, inputs, params):
+        self._require("node.demucs")
         from workers.demucs_worker import DemucsWorker
 
         audio_in = inputs.get("audio_in")
@@ -562,6 +573,7 @@ class WhisperExec(NodeExecutor):
     }
 
     def execute(self, ctx, inputs, params):
+        self._require("node.whisper")
         from workers.whisper_worker import WhisperWorker
 
         audio_in = inputs.get("audio_in")
@@ -814,6 +826,7 @@ class GPTSoVITSExec(NodeExecutor):
         return (params.get(key) or "").strip()
 
     def execute(self, ctx, inputs, params):
+        self._require("node.gptsovits")
         from workers.gptsovits_worker import GPTSoVITSInferWorker
 
         # ── 必填：模型 + 参考音频 ──────────────────────────────────────
@@ -1362,6 +1375,7 @@ class RVCExec(NodeExecutor):
         return (params.get(key) or "").strip()
 
     def execute(self, ctx, inputs, params):
+        self._require("node.rvc")
         from workers.rvc_worker import RVCInferWorker
 
         audio_in = inputs.get("audio_in")
@@ -1701,6 +1715,7 @@ class AudiocraftExec(NodeExecutor):
     """
 
     def execute(self, ctx, inputs, params):
+        self._require("node.audiocraft")
         from workers.audiocraft_worker import AudiocraftWorker
 
         # ── prompt:端口优先 参数兜底 ──────────────────────────────────

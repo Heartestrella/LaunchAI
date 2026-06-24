@@ -19,6 +19,7 @@ from utils.configer import get_field, set_field, get_global_config
 
 PYTHON_PATH = sys.executable
 GIT_PROJECTS_ROOT = os.path.join(os.getcwd(), "_git_projects")
+LOCKS_ROOT = os.path.join(os.getcwd(), "locks")
 cache_ = os.path.join(os.getcwd(), "torch_cache")
 fork_map = {
     "demucs": "main",
@@ -27,8 +28,28 @@ fork_map = {
     "GPT-SoVITS": "main",
     "audiocraft": "main",
 }
+# 工具名 → locks/ 目录下的 lock 文件名。命中即用锁版安装,代替
+# 直接 pip install <pkg> / pip install -r <上游 requirements.txt>。
+# 缺锁的工具(目前是 Real-ESRGAN, IOPaint)继续走原有上游 requirements 路径。
+LOCK_MAP = {
+    "demucs": "demucs.txt",
+    "openai-whisper": "whisper.txt",
+    "ultralytics": "ultralytics.txt",
+    "Applio": "applio.txt",
+    "GPT-SoVITS": "gptsovits.txt",
+    "audiocraft": "audiocraft.txt",
+}
 MIRROR_URLS = get_field("git_mirror_hosts", [])
 info(f"获取到GIT加速镜像: {MIRROR_URLS}")
+
+
+def _lock_path(tool_name: str):
+    """根据工具名定位 locks/<file>。文件不存在或工具未在 LOCK_MAP 时返回 None。"""
+    fname = LOCK_MAP.get(tool_name)
+    if not fname:
+        return None
+    path = os.path.join(LOCKS_ROOT, fname)
+    return path if os.path.exists(path) else None
 
 
 class PipWorker(QThread):
@@ -67,7 +88,18 @@ class PipWorker(QThread):
                 return
                 # self.command.extend(["-U", self.from_git[1]])
             else:
-                self.command.extend(self.package_name)
+                # is_torch 走 torch wheel 直链分支,不应被 lock 拦截。
+                # 单包安装(whisper / ultralytics / iopaint) 命中 LOCK_MAP 时,
+                # 改成 pip install -r locks/<tool>.txt;否则保持原行为。
+                lock = None
+                if not self.is_torch and self.package_name and len(self.package_name) == 1:
+                    lock = _lock_path(self.package_name[0])
+                if lock:
+                    self.output_signal.emit(self._html(
+                        f"使用锁版依赖: locks/{os.path.basename(lock)}", "#4FC3F7"))
+                    self.command.extend(["-r", lock])
+                else:
+                    self.command.extend(self.package_name)
 
             if self.force:
                 self.command.extend(["--force-reinstall", "--no-cache-dir"])
@@ -786,93 +818,110 @@ else:
             return None
 
         elif package == "demucs":
-            req_file = os.path.join(project_root, "requirements_minimal.txt")
-            if os.path.exists(req_file):
-                self._filter_torch_requirements(req_file)
-                if sys.platform == "win32":
-                    with open(req_file, 'a', encoding='utf-8') as f:
-                        f.write("\nsoundfile\n")
-                self._run_pip_install(["-r", req_file])
+            lock = _lock_path(package)
+            if lock:
+                self.output_signal.emit(self._html(
+                    f"使用锁版依赖: locks/{os.path.basename(lock)}", "#4FC3F7"))
+                self._run_pip_install(["-r", lock])
+            else:
+                req_file = os.path.join(project_root, "requirements_minimal.txt")
+                if os.path.exists(req_file):
+                    self._filter_torch_requirements(req_file)
+                    if sys.platform == "win32":
+                        with open(req_file, 'a', encoding='utf-8') as f:
+                            f.write("\nsoundfile\n")
+                    self._run_pip_install(["-r", req_file])
             self._run_pip_install([project_root])
             self._emit_install_finished(package)
             return None
 
         elif package == "Applio":
             # Applio 是仓库形式运行（python core.py ...），不是 pip 包，不需要 develop/install
-            # 仅处理依赖：过滤 torch* 后 pip install -r requirements.txt
-            req_file = os.path.join(project_root, "requirements.txt")
-            if os.path.exists(req_file):
-                self._filter_torch_requirements(req_file)
-                ok = self._run_pip_install(["-r", req_file])
+            # 优先用 locks/applio.txt 锁版安装,回退到上游 requirements.txt(过滤 torch*)
+            lock = _lock_path(package)
+            if lock:
+                self.output_signal.emit(self._html(
+                    f"使用锁版依赖: locks/{os.path.basename(lock)}", "#4FC3F7"))
+                ok = self._run_pip_install(["-r", lock])
                 if not ok and not self._is_cancelled:
                     self.finished_signal.emit(False, f"{package} 依赖安装失败")
                     return None
             else:
-                self.output_signal.emit(self._html(
-                    f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
+                req_file = os.path.join(project_root, "requirements.txt")
+                if os.path.exists(req_file):
+                    self._filter_torch_requirements(req_file)
+                    ok = self._run_pip_install(["-r", req_file])
+                    if not ok and not self._is_cancelled:
+                        self.finished_signal.emit(False, f"{package} 依赖安装失败")
+                        return None
+                else:
+                    self.output_signal.emit(self._html(
+                        f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
             self._emit_install_finished(package)
             return None
 
         elif package == "GPT-SoVITS":
-            # 仓库形式运行：克隆 + 过滤 torch 后装 requirements.txt
-            # 预训练权重需用户自行放到 GPT_SoVITS/pretrained_models/，runner 启动时会校验
-            req_file = os.path.join(project_root, "requirements.txt")
-            # 上次失败留下的过滤后 requirements 会缺行,
-            # 先 git checkout 一下让本次过滤从原始内容开始。
-            if os.path.exists(os.path.join(project_root, ".git")):
-                try:
-                    subprocess.run(
-                        ["git", "checkout", "--", "requirements.txt"],
-                        cwd=project_root, capture_output=True, timeout=10)
-                except Exception as e:
-                    self.output_signal.emit(self._html(
-                        f"⚠️ 重置 requirements.txt 失败(将沿用现有内容): {e}", "#FF9800"))
-            if os.path.exists(req_file):
-                self._filter_torch_requirements(req_file)
-                # 剥掉需要本地 C/C++/CMake 编译且没 win-py311 预编译 wheel 的依赖,
-                # 后面用纯 Python / 预编译替代版单独装回来:
-                #   jieba_fast → jieba (纯 Python, requirements 里本来就有)
-                #   pyopenjtalk → pyopenjtalk-plus (drop-in, 有预编译 wheel)
-                #   opencc → opencc-python-reimplemented (纯 Python, API 兼容)
-                # opencc 这行 requirements 里同时有 `--no-binary=opencc` 选项行,
-                # _strip_requirements 会一并处理(否则强制源码编译同样失败)。
-                removed = self._strip_requirements(
-                    req_file, ("jieba_fast", "pyopenjtalk", "opencc"))
-                if removed:
-                    self.output_signal.emit(self._html(
-                        f"已从 requirements 移除: {', '.join(removed)}"
-                        "(将以纯 Python / 预编译替代版安装)",
-                        "#4FC3F7"))
-                ok = self._run_pip_install(["-r", req_file])
+            # 仓库形式运行,预训练权重需用户自行放到 GPT_SoVITS/pretrained_models/
+            # 优先用 locks/gptsovits.txt —— 里面已经含三个替代品 (pyopenjtalk-plus /
+            # opencc-python-reimplemented / pytorch-lightning),无需再单独补装
+            lock = _lock_path(package)
+            if lock:
+                self.output_signal.emit(self._html(
+                    f"使用锁版依赖: locks/{os.path.basename(lock)}", "#4FC3F7"))
+                ok = self._run_pip_install(["-r", lock])
                 if not ok and not self._is_cancelled:
                     self.finished_signal.emit(False, f"{package} 依赖安装失败")
                     return None
             else:
-                self.output_signal.emit(self._html(
-                    f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
+                # 回退:走上游 requirements.txt + 过滤 + 剥不编译的包 + 补装替代品
+                req_file = os.path.join(project_root, "requirements.txt")
+                # 上次失败留下的过滤后 requirements 会缺行,
+                # 先 git checkout 一下让本次过滤从原始内容开始。
+                if os.path.exists(os.path.join(project_root, ".git")):
+                    try:
+                        subprocess.run(
+                            ["git", "checkout", "--", "requirements.txt"],
+                            cwd=project_root, capture_output=True, timeout=10)
+                    except Exception as e:
+                        self.output_signal.emit(self._html(
+                            f"⚠️ 重置 requirements.txt 失败(将沿用现有内容): {e}", "#FF9800"))
+                if os.path.exists(req_file):
+                    self._filter_torch_requirements(req_file)
+                    # 剥掉需要本地 C/C++/CMake 编译且没 win-py311 预编译 wheel 的依赖,
+                    # 后面用纯 Python / 预编译替代版单独装回来:
+                    #   jieba_fast → jieba (纯 Python, requirements 里本来就有)
+                    #   pyopenjtalk → pyopenjtalk-plus (drop-in, 有预编译 wheel)
+                    #   opencc → opencc-python-reimplemented (纯 Python, API 兼容)
+                    removed = self._strip_requirements(
+                        req_file, ("jieba_fast", "pyopenjtalk", "opencc"))
+                    if removed:
+                        self.output_signal.emit(self._html(
+                            f"已从 requirements 移除: {', '.join(removed)}"
+                            "(将以纯 Python / 预编译替代版安装)",
+                            "#4FC3F7"))
+                    ok = self._run_pip_install(["-r", req_file])
+                    if not ok and not self._is_cancelled:
+                        self.finished_signal.emit(False, f"{package} 依赖安装失败")
+                        return None
+                else:
+                    self.output_signal.emit(self._html(
+                        f"⚠️ 未找到 {req_file}，跳过依赖安装", "#FF9800"))
 
-            # GPT-SoVITS 代码里硬编码 import pyopenjtalk / from opencc import OpenCC /
-            # from pytorch_lightning import LightningModule,但 upstream requirements.txt
-            # 不全。这里用预编译 / 纯 Python 替代并补齐遗漏:
-            #   pyopenjtalk-plus: tsukumijima 维护, 提供 win/mac/linux 预编译 wheel,
-            #                     模块名仍是 pyopenjtalk, 自带优化字典不需要首次联网下载
-            #   opencc-python-reimplemented: 纯 Python 实现, API 与 C++ 版 OpenCC 兼容
-            #   pytorch-lightning: GPT-SoVITS 推理用到 LightningModule, 但 requirements
-            #                      没列(upstream 漏写, 本来靠 funasr 等传递依赖带上)
-            self.output_signal.emit(self._html(
-                "正在安装 pyopenjtalk-plus(日文 G2P 预编译版)...", "#4FC3F7"))
-            ok_jtalk = self._run_pip_install(["pyopenjtalk-plus"])
-            self.output_signal.emit(self._html(
-                "正在安装 opencc-python-reimplemented(繁简转换纯 Python 版)...",
-                "#4FC3F7"))
-            ok_opencc = self._run_pip_install(["opencc-python-reimplemented"])
-            self.output_signal.emit(self._html(
-                "正在安装 pytorch-lightning(推理依赖,upstream requirements 遗漏)...",
-                "#4FC3F7"))
-            ok_pl = self._run_pip_install(["pytorch-lightning"])
-            if not (ok_jtalk and ok_opencc and ok_pl) and not self._is_cancelled:
+                # 补装三个替代品 / 遗漏包
                 self.output_signal.emit(self._html(
-                    "⚠️ 部分补装依赖失败,相关功能可能不可用", "#FF9800"))
+                    "正在安装 pyopenjtalk-plus(日文 G2P 预编译版)...", "#4FC3F7"))
+                ok_jtalk = self._run_pip_install(["pyopenjtalk-plus"])
+                self.output_signal.emit(self._html(
+                    "正在安装 opencc-python-reimplemented(繁简转换纯 Python 版)...",
+                    "#4FC3F7"))
+                ok_opencc = self._run_pip_install(["opencc-python-reimplemented"])
+                self.output_signal.emit(self._html(
+                    "正在安装 pytorch-lightning(推理依赖,upstream requirements 遗漏)...",
+                    "#4FC3F7"))
+                ok_pl = self._run_pip_install(["pytorch-lightning"])
+                if not (ok_jtalk and ok_opencc and ok_pl) and not self._is_cancelled:
+                    self.output_signal.emit(self._html(
+                        "⚠️ 部分补装依赖失败,相关功能可能不可用", "#FF9800"))
 
             # 源码里硬编码 `import jieba_fast`,该包是 jieba 的 C 加速 fork,
             # 在 win-py311 上没有预编译 wheel,源码装也需要 VS Build Tools。
@@ -911,7 +960,9 @@ else:
             pyproject_file = os.path.join(project_root, "pyproject.toml")
 
             # Step 1: 把 `av==11.0.0` 替换成 `av>=11.0.0`,setup.py / requirements
-            # / setup.cfg / pyproject.toml 里都扫一遍
+            # / setup.cfg / pyproject.toml 里都扫一遍。
+            # 即便走 lock 装依赖,Step 5 装 audiocraft 本体时 setup.py 仍会读到
+            # av==11 约束并触发源码构建,所以这一步必须保留。
             av_pin = re.compile(r'av\s*==\s*11\.0\.0')
             patched = []
             for path in (req_file, setup_file, cfg_file, pyproject_file):
@@ -933,47 +984,49 @@ else:
                     f"✅ 已把 {', '.join(patched)} 里的 av==11.0.0 放宽到 av>=11.0.0",
                     "#4CAF50"))
 
-            # Step 2: 过滤掉 torch* (按项目惯例,torch 由用户在设置里装)
-            if os.path.exists(req_file):
-                self._filter_torch_requirements(req_file)
-                # _filter_torch_requirements 只精确剥 torch/torchvision/torchaudio,
-                # 下面这几个名字带 torch 字串或者 torch transitive 约束的依赖必须额外处理,
-                # 否则 pip resolver 会把已装好的 CUDA torch 强制回滚成 PyPI 默认的 CPU 版:
-                #   - torchtext==0.16.0: 钉死 torch>=2.1.0,<2.2.0,
-                #     而 2.1.0+cu124 不在默认 PyPI 索引上,pip 拿到的就是 CPU 2.1.0;
-                #     全仓库 grep `import torchtext` 0 命中,纯死代码,直接剥
-                #   - xformers<0.0.23: 0.0.22.post7 钉死 torch==2.0.1,雪上加霜;
-                #     但 audiocraft/modules/transformer.py 顶层 `from xformers import ops`
-                #     必须有,所以这里剥掉旧版约束,Step 6 用 --no-deps 单装新版
-                #   - pesq: Windows 上 PyPI 没有预编译 wheel,源码构建要 MSVC + Cython;
-                #     只在 metrics/pesq.py 和 solvers/watermark.py 里 import,
-                #     LaunchAI 只跑 MusicGen / AudioGen 推理,路径完全走不到
-                removed = self._strip_requirements(
-                    req_file, ("pesq", "torchtext", "xformers"))
-                if removed:
-                    self.output_signal.emit(self._html(
-                        f"已从 requirements 移除: {', '.join(removed)} "
-                        "(torchtext/xformers 会把 CUDA torch 拖成 CPU;pesq 无 wheel)",
-                        "#4FC3F7"))
-
-            # Step 3: 先单独装一个 wheel 可用的 av (强制 only-binary,
-            # 防止 pip 看到 av==11.0.0 还是回到源码构建)
-            self.output_signal.emit(self._html(
-                "正在安装 av (绕过 11.0.0 缺 wheel,改装最新可用版本)...",
-                "#4FC3F7"))
-            ok_av = self._run_pip_install(["av", "--only-binary=:all:"])
-            if not ok_av and not self._is_cancelled:
-                self.finished_signal.emit(False, "av 安装失败 (无可用 wheel)")
-                return None
-
-            # Step 4: 装其余依赖
-            if os.path.exists(req_file):
+            # Step 2-4: 装依赖。优先走 locks/audiocraft.txt(已干净,不含 torch/
+            # pesq/torchtext/xformers,av 也是已知能装 wheel 的版本);
+            # 没锁文件时回退到上游 requirements,过滤 torch* + 剥 pesq/torchtext/xformers,
+            # 再单独装 av --only-binary。
+            lock = _lock_path(package)
+            if lock:
                 self.output_signal.emit(self._html(
-                    "正在安装 audiocraft 依赖 (requirements.txt)...", "#4FC3F7"))
-                ok_req = self._run_pip_install(["-r", req_file])
+                    f"使用锁版依赖: locks/{os.path.basename(lock)}", "#4FC3F7"))
+                ok_req = self._run_pip_install(["-r", lock])
                 if not ok_req and not self._is_cancelled:
                     self.finished_signal.emit(False, "audiocraft 依赖安装失败")
                     return None
+            else:
+                # 没锁:照旧过滤上游 requirements,然后单独装 av,再装其余
+                if os.path.exists(req_file):
+                    self._filter_torch_requirements(req_file)
+                    # 这几个会把 CUDA torch 拖成 CPU 或源码构建失败,必须剥:
+                    #   torchtext: 钉 torch>=2.1.0,<2.2.0; 仓库 grep 0 命中纯死代码
+                    #   xformers<0.0.23: 钉 torch==2.0.1; Step 6 用 --no-deps 单装新版
+                    #   pesq: 无 win wheel; LaunchAI 只跑推理,代码路径走不到
+                    removed = self._strip_requirements(
+                        req_file, ("pesq", "torchtext", "xformers"))
+                    if removed:
+                        self.output_signal.emit(self._html(
+                            f"已从 requirements 移除: {', '.join(removed)} "
+                            "(torchtext/xformers 会把 CUDA torch 拖成 CPU;pesq 无 wheel)",
+                            "#4FC3F7"))
+
+                self.output_signal.emit(self._html(
+                    "正在安装 av (绕过 11.0.0 缺 wheel,改装最新可用版本)...",
+                    "#4FC3F7"))
+                ok_av = self._run_pip_install(["av", "--only-binary=:all:"])
+                if not ok_av and not self._is_cancelled:
+                    self.finished_signal.emit(False, "av 安装失败 (无可用 wheel)")
+                    return None
+
+                if os.path.exists(req_file):
+                    self.output_signal.emit(self._html(
+                        "正在安装 audiocraft 依赖 (requirements.txt)...", "#4FC3F7"))
+                    ok_req = self._run_pip_install(["-r", req_file])
+                    if not ok_req and not self._is_cancelled:
+                        self.finished_signal.emit(False, "audiocraft 依赖安装失败")
+                        return None
 
             # Step 5: 装 audiocraft 本体 (此时 av 已满足,setup.py 不会再尝试装 av==11)
             self.output_signal.emit(self._html(

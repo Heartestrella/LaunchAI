@@ -67,16 +67,19 @@ from widgets.subpage.subpage_demucs import AudioSeparationWidget
 from workers.demucs_worker import DemucsWorker
 from widgets.home_page import HomePage
 from widgets.subpage.subpage_setting_page import SettingsWidget
-from widgets.subpage.subpage_switch_pages import SwitchPage
+from widgets.subpage.subpage_switch_pages import SwitchPage, LazySwitchPage
 from widgets.subpage.subpage_materials import MaterialsWidget
 from widgets.subpage.subpage_model_hub import ModelHubWidget
 from widgets.subpage.subpage_llm_chat import LLMChatPage
 from node.node_editor import NodeEditorPage
 from workers.pip_worker import PipWorker
+from utils.configer import get_field
 from logger import info, warning, debug, error
 
 CUDA_DRIVERS = PipWorker.get_torch_devices()
 info(f"获取到设备列表: {CUDA_DRIVERS}")
+LAZY_STARTUP = bool(get_field("app.lazy_startup", False))
+info(f"懒启动: {'开' if LAZY_STARTUP else '关'}")
 
 class Widget(QWidget):
     def __init__(self, text: str, parent=None):
@@ -105,19 +108,24 @@ class Window(FluentWindow):
             info(f"[init] {name}: {(now-_t)*1000:.0f} ms")
             _t = now
 
+        # 懒启动开关:audio / image 分组下八个工具页用 LazySwitchPage,
+        # 启动只挂占位,首次点开才构造真页。home / llm_chat / 设置 / 素材库 /
+        # 模型市场 / 节点编辑器 永远饿加载。
+        _PageCls = LazySwitchPage if LAZY_STARTUP else SwitchPage
+
         self.homeInterface       = HomePage(self);                                          mark("HomePage")
         self.llmChatInterface    = LLMChatPage(self);                                       mark("LLMChatPage")
         self.settingInterface    = SettingsWidget(self);                                    mark("SettingsWidget")
-        self.demucsinterface     = SwitchPage("demucs",  CUDA_DRIVERS, self);               mark("SwitchPage demucs")
-        self.ESRGANinterface     = SwitchPage("ESRGAN",  CUDA_DRIVERS, self);               mark("SwitchPage ESRGAN")
-        self.whisperInterface    = SwitchPage("whisper", CUDA_DRIVERS, self);               mark("SwitchPage whisper")
-        self.rvcInterface        = SwitchPage("rvc",     CUDA_DRIVERS, self);               mark("SwitchPage rvc")
-        self.gptsovitsInterface  = SwitchPage("gptsovits", CUDA_DRIVERS, self);             mark("SwitchPage gptsovits")
-        self.audiocraftInterface = SwitchPage("audiocraft", CUDA_DRIVERS, self);            mark("SwitchPage audiocraft")
+        self.demucsinterface     = _PageCls("demucs",  CUDA_DRIVERS, self);                 mark("SwitchPage demucs")
+        self.ESRGANinterface     = _PageCls("ESRGAN",  CUDA_DRIVERS, self);                 mark("SwitchPage ESRGAN")
+        self.whisperInterface    = _PageCls("whisper", CUDA_DRIVERS, self);                 mark("SwitchPage whisper")
+        self.rvcInterface        = _PageCls("rvc",     CUDA_DRIVERS, self);                 mark("SwitchPage rvc")
+        self.gptsovitsInterface  = _PageCls("gptsovits", CUDA_DRIVERS, self);               mark("SwitchPage gptsovits")
+        self.audiocraftInterface = _PageCls("audiocraft", CUDA_DRIVERS, self);              mark("SwitchPage audiocraft")
         self.materialsInterface  = MaterialsWidget(self);                                   mark("MaterialsWidget")
         self.modelHubInterface   = ModelHubWidget(self);                                    mark("ModelHubWidget")
-        self.yoloInterface       = SwitchPage("yolo",    CUDA_DRIVERS, self);               mark("SwitchPage yolo")
-        self.iopaintInterface    = SwitchPage("iopaint", CUDA_DRIVERS, self);               mark("SwitchPage iopaint")
+        self.yoloInterface       = _PageCls("yolo",    CUDA_DRIVERS, self);                 mark("SwitchPage yolo")
+        self.iopaintInterface    = _PageCls("iopaint", CUDA_DRIVERS, self);                 mark("SwitchPage iopaint")
         self.nodeEditorInterface = NodeEditorPage(cuda_drivers=CUDA_DRIVERS, parent=self);  mark("NodeEditorPage")
 
         self.worker = None

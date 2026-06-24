@@ -1,0 +1,15 @@
+# demucs (facebookresearch/demucs @ fork_map main)
+# pip_worker.py:788-797 的安装流程:
+#   1. requirements_minimal.txt 过滤掉 torch* 后 pip install -r
+#   2. pip install <project_root>  (装 demucs 包本体)
+# 这里只 lock 步骤 1 涉及的顶层包。demucs 包本体的版本对应仓库 main
+# 分支某次 commit,由 fork_map 控制,不在 pip lock 范围。
+
+dora-search==0.1.12
+einops==0.8.2
+julius==0.2.8
+lameenc==1.8.2
+openunmix==1.3.0
+PyYAML==6.0.3
+tqdm==4.68.3
+soundfile==0.12.1

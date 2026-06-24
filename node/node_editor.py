@@ -4,6 +4,7 @@ node_editor.py
 主编辑器窗口：画布 + Shift+A 节点面板 + 属性面板 + 工具栏
 """
 
+from utils.configer import get_field, set_field
 from node.node_canvas import NodeCanvas
 from node.node_graph import NodeGraph
 from node.node_registry import REGISTRY, CATEGORY_COLORS, PORT_COLORS, NodeDef
@@ -43,7 +44,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # 用户配置里记录"上次打开的 .node 文件"
-from utils.configer import get_field, set_field
 _LAST_FILE_KEY = "node_editor.last_file"
 # 整个 tab 会话快照（含未保存的图）—— 重启后还原所有打开的 tab
 _SESSION_KEY = "node_editor.session"
@@ -162,11 +162,15 @@ def _format_music_hit(hit: dict) -> str:
     return f"{name}  —  {tail}" if tail else name
 
 
-_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
-_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
+_FILE_PARAM_KEYS = {"path", "file", "filepath",
+                    "filename", "input", "list_path"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder",
+                   "out_dir", "output_dir", "audio_dir"}
 _DEVICE_PARAM_KEYS = {"device", "gpu", "gpu_id"}
-_FILE_PARAM_KEYS = {"path", "file", "filepath", "filename", "input", "list_path"}
-_DIR_PARAM_KEYS = {"directory", "dir", "folder", "out_dir", "output_dir", "audio_dir"}
+_FILE_PARAM_KEYS = {"path", "file", "filepath",
+                    "filename", "input", "list_path"}
+_DIR_PARAM_KEYS = {"directory", "dir", "folder",
+                   "out_dir", "output_dir", "audio_dir"}
 # 多行文本参数 —— 渲染为 PlainTextEdit 而非单行 LineEdit
 # 适用于 prompt / 参考文本 / 目标文本 / 注释 等长内容
 _MULTILINE_TEXT_PARAM_KEYS = {"text", "ref_text", "target_text",
@@ -483,7 +487,7 @@ class _MusicSearchThread(QThread):
     """
 
     results = pyqtSignal(list)   # list[dict]
-    error   = pyqtSignal(str)
+    error = pyqtSignal(str)
 
     def __init__(self, source: str, keyword: str, parent=None):
         super().__init__(parent)
@@ -740,10 +744,14 @@ class PropertyPanel(QWidget):
             rng = _NUMERIC_PARAM_RANGES.get(key_low)
             vmin, vmax, step = rng if rng else (-9999.0, 9999.0, 0.1)
             # 根据步长推导小数位 0.05 → 2 位 0.1 → 1 位
-            if   step >= 1:    decimals = 0
-            elif step >= 0.1:  decimals = 1
-            elif step >= 0.01: decimals = 2
-            else:              decimals = 4
+            if step >= 1:
+                decimals = 0
+            elif step >= 0.1:
+                decimals = 1
+            elif step >= 0.01:
+                decimals = 2
+            else:
+                decimals = 4
 
             dsb = DoubleSpinBox(row)
             dsb.setRange(float(vmin), float(vmax))
@@ -895,9 +903,12 @@ class PropertyPanel(QWidget):
         # ── 还原已保存的选择 (打开文件 / 选中节点时) ──────────────
         node = self.graph.nodes.get(iid)
         saved_id = str((node.params.get("selected_id") if node else "") or "")
-        saved_title = str((node.params.get("selected_title") if node else "") or "")
-        saved_kw = str((node.params.get("selected_keyword") if node else "") or "")
-        saved_src = str((node.params.get("selected_source") if node else "") or "")
+        saved_title = str(
+            (node.params.get("selected_title") if node else "") or "")
+        saved_kw = str(
+            (node.params.get("selected_keyword") if node else "") or "")
+        saved_src = str(
+            (node.params.get("selected_source") if node else "") or "")
         cur_src = str((node.params.get("source") if node else "") or "netease")
         # 只有当 (关键字, 数据源) 与保存时一致 才认为这条选择仍然有效
         if saved_id and saved_title and saved_kw == str(val) and saved_src == cur_src:
@@ -1160,13 +1171,13 @@ class NodeEditorPage(QWidget):
         title.setStyleSheet("color:#e0e0e0;font-size:15px;font-weight:bold;")
         tb_lay.addWidget(title)
 
-        badge = QLabel("实验性", toolbar)
-        badge.setStyleSheet(
-            "background:rgba(247,183,49,0.2);color:#F7B731;"
-            "border:1px solid rgba(247,183,49,0.4);"
-            "border-radius:4px;padding:1px 6px;font-size:10px;")
-        tb_lay.addWidget(badge)
-        tb_lay.addStretch()
+        # badge = QLabel("实验性", toolbar)
+        # badge.setStyleSheet(
+        #     "background:rgba(247,183,49,0.2);color:#F7B731;"
+        #     "border:1px solid rgba(247,183,49,0.4);"
+        #     "border-radius:4px;padding:1px 6px;font-size:10px;")
+        # tb_lay.addWidget(badge)
+        # tb_lay.addStretch()
 
         hint = QLabel(
             "Shift+A 添加  ·  Shift+D 复制  ·  X/Del 删除  ·  "
@@ -1207,10 +1218,14 @@ class NodeEditorPage(QWidget):
         root.addWidget(toolbar)
 
         # 文件操作快捷键（保留原有 Shift+A）
-        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self._open_file)
-        QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_file)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self).activated.connect(self._save_file_as)
-        QShortcut(QKeySequence("Ctrl+T"), self).activated.connect(self._new_tab)
+        QShortcut(QKeySequence("Ctrl+O"),
+                  self).activated.connect(self._open_file)
+        QShortcut(QKeySequence("Ctrl+S"),
+                  self).activated.connect(self._save_file)
+        QShortcut(QKeySequence("Ctrl+Shift+S"),
+                  self).activated.connect(self._save_file_as)
+        QShortcut(QKeySequence("Ctrl+T"),
+                  self).activated.connect(self._new_tab)
         QShortcut(QKeySequence("Ctrl+W"), self).activated.connect(
             lambda: self._close_tab(self._tabbar.currentIndex())
         )
@@ -1220,7 +1235,8 @@ class NodeEditorPage(QWidget):
         self._tabbar.setMovable(True)
         self._tabbar.setScrollable(True)
         self._tabbar.setTabMaximumWidth(220)
-        self._tabbar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ALWAYS)
+        self._tabbar.setCloseButtonDisplayMode(
+            TabCloseButtonDisplayMode.ALWAYS)
         self._tabbar.setStyleSheet(
             "TabBar{background:#1e1e1e;"
             "border-bottom:1px solid rgba(255,255,255,0.08);}"
@@ -1857,7 +1873,8 @@ class NodeEditorPage(QWidget):
         else:
             last = get_field(_LAST_FILE_KEY)
             if last:
-                start_dir = os.path.dirname(last) if os.path.isfile(last) else ""
+                start_dir = os.path.dirname(
+                    last) if os.path.isfile(last) else ""
             if not start_dir:
                 start_dir = "untitled.node"
 
@@ -1873,7 +1890,8 @@ class NodeEditorPage(QWidget):
     def _save_to_path(self, path: str):
         try:
             data = self.graph.to_dict()
-            os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+            os.makedirs(os.path.dirname(os.path.abspath(path))
+                        or ".", exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:

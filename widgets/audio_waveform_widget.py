@@ -53,6 +53,7 @@ def _resource_svg_icon(rel_path: str, color: str = "#EAEAEA",
     painter.end()
     return QIcon(pix)
 
+
 try:
     import sounddevice as sd
     HAS_SD = True
@@ -587,14 +588,14 @@ class AudioWaveformWidget(QWidget):
         """公开 API 程序化加载音频文件路径 不弹文件选择对话框
 
         供 SubpageMaterials 等外部页面在预览流程中复用此波形组件。
+        soundfile 优先；不支持 MP4/M4A/AAC 容器时降级 ffmpeg 解码。
         失败通过 InfoBar 报错 不会抛异常出去。
         """
         if not path:
             return
         self._stop()
-        try:
-            import soundfile as sf
-            data, sr = sf.read(path, dtype='float32', always_2d=True)
+
+        def _apply(data, sr):
             mono = data.mean(axis=1)
             self._file_data = mono
             self._file_sr = sr
@@ -614,9 +615,88 @@ class AudioWaveformWidget(QWidget):
             self._status.setText(f"Loaded  ·  {name}")
             InfoBar.success(title="File loaded", content=name, parent=self,
                             position=InfoBarPosition.TOP_RIGHT, duration=2500)
-        except Exception as e:
-            InfoBar.error(title="Load error", content=str(e), parent=self,
+
+        # 主路径：soundfile
+        try:
+            import soundfile as sf
+            data, sr = sf.read(path, dtype='float32', always_2d=True)
+            _apply(data, sr)
+            return
+        except Exception:
+            pass
+
+        # 降级：ffmpeg 解码 MP4/M4A/AAC 容器
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".m4a", ".aac", ".mp4"}:
+            # 不是容器问题，是真正的读取失败
+            import traceback
+            InfoBar.error(title="Load error",
+                          content=traceback.format_exc().splitlines()[-1],
+                          parent=self,
                           position=InfoBarPosition.TOP_RIGHT, duration=4000)
+            return
+
+        import subprocess
+        import tempfile
+        import sys
+        import numpy as np
+
+        # 找 ffmpeg
+        ffmpeg = os.path.join(os.getcwd(), "resource",
+                              "ffmpeg", "bin", "ffmpeg.exe")
+        if not os.path.isfile(ffmpeg):
+            ffmpeg = "ffmpeg"
+
+        # 探采样率
+        ffprobe = ffmpeg.replace(
+            "ffmpeg.exe", "ffprobe.exe").replace("ffmpeg", "ffprobe")
+        probe_sr = 44100
+        try:
+            import json
+            p = subprocess.run(
+                [ffprobe, "-v", "quiet", "-print_format", "json",
+                 "-show_streams", path],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            info = json.loads(p.stdout)
+            for stream in info.get("streams", []):
+                if stream.get("codec_type") == "audio":
+                    probe_sr = int(stream.get("sample_rate", 44100))
+                    break
+        except Exception:
+            pass
+
+        tmp = None
+        try:
+            tmp = tempfile.NamedTemporaryFile(suffix=".raw", delete=False)
+            tmp.close()
+
+            cmd = [
+                ffmpeg, "-y", "-i", path,
+                "-f", "f32le",
+                "-acodec", "pcm_f32le",
+                "-ar", str(probe_sr),
+                "-ac", "2",
+                tmp.name,
+            ]
+            subprocess.run(cmd, check=True, capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+
+            raw = np.fromfile(tmp.name, dtype=np.float32)
+            samples = len(raw) // 2
+            data = raw[:samples * 2].reshape(samples, 2)
+            _apply(data, probe_sr)
+
+        except Exception as e:
+            InfoBar.error(title="FFmpeg decode error", content=str(e),
+                          parent=self,
+                          position=InfoBarPosition.TOP_RIGHT, duration=4000)
+        finally:
+            if tmp and os.path.isfile(tmp.name):
+                try:
+                    os.unlink(tmp.name)
+                except OSError:
+                    pass
 
     def set_embedded_mode(self, embedded: bool):
         """嵌入模式 隐藏 Header / Open / Record 等冗余组件 留出空间给宿主页面

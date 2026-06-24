@@ -1,0 +1,28 @@
+# openai-whisper
+# 完整子环境锁。pip_worker 走的是最朴素的 `pip install -r locks/whisper.txt`
+# (subpage_switch_pages.py:263 → pip_worker.py:96-100)。
+#
+# 为什么要把 numpy / numba / llvmlite 也显式 pin:
+#   numba 0.63 的 NumPy 兼容上限是 2.3,而 audiocraft / applio / gptsovits
+#   上游的 requirements 会把 numpy 拉到 2.4+(它们各自的 lock 里历史也是
+#   numpy==2.4.6),导致 whisper 装完后再装这三个工具,numba import 直接挂:
+#       ImportError: Numba needs NumPy 2.3 or less. Got NumPy 2.4.
+#   显式 pin 后,后续 pip install -r 会因为版本冲突而保留 numpy==1.26.4
+#   (lock 之间相互一致),whisper 的 numba 路径始终可用。
+#
+# 同步规则:本文件的 numpy / numba / llvmlite 必须与
+#   locks/audiocraft.txt、locks/applio.txt、locks/gptsovits.txt 保持完全一致。
+# 改其中一个就要 4 个文件一起改。
+
+openai-whisper==20250625
+
+# === 跨工具共享版本,改这里必须同步另外三个 lock ===
+numpy==1.26.4
+numba==0.63.1
+llvmlite==0.46.0
+
+# === whisper 自身的其它顶层依赖,防止被降版本 ===
+tiktoken==0.13.0
+more-itertools==11.1.0
+regex==2026.5.9
+tqdm==4.68.2

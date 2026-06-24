@@ -1,0 +1,5 @@
+# YOLO (Ultralytics)
+# pip_worker 走 `pip install ultralytics` (subpage_switch_pages.py:265)
+
+ultralytics==8.4.75
+ultralytics-thop==2.0.20

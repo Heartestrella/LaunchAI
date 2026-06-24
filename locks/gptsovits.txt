@@ -1,0 +1,57 @@
+# GPT-SoVITS (RVC-Boss/GPT-SoVITS @ fork_map main)
+# pip_worker.py:816-900 流程:
+#   1. git checkout 还原上游 requirements.txt
+#   2. _filter_torch_requirements 剥 torch*
+#   3. _strip_requirements 剥 (jieba_fast, pyopenjtalk, opencc) —— win-py311 没 wheel
+#   4. pip install -r requirements.txt
+#   5. 单独装替代版: pyopenjtalk-plus / opencc-python-reimplemented / pytorch-lightning
+#   6. _patch_gptsovits_source 改源码 `jieba_fast` → `jieba`
+#   7. python -m nltk.downloader averaged_perceptron_tagger_eng cmudict
+# 这里只 lock 步骤 4 + 5 的 pip 包,源码 patch 和 nltk 资源属于运行时数据,不在 lock 范围。
+#
+# 注意:上游 requirements 写了 `numpy<2.0`,本 lock 锁 1.26.4 —— 这是
+# 同时满足 (1) GPT-SoVITS 上游 numpy<2.0 (2) whisper 的 numba 0.63
+# 兼容上限 numpy 2.3 的版本,与 whisper.txt / audiocraft.txt / applio.txt
+# 同步。改这一行必须四个 lock 一起改。
+#
+# 已剥掉(由替代品装回): jieba_fast / pyopenjtalk / opencc
+# Linux/Mac 限定行(本文件按 win32 锁版): python_mecab_ko
+
+numpy==1.26.4
+scipy==1.16.3
+tensorboard==2.20.0
+librosa==0.10.2
+numba==0.63.1
+pytorch-lightning==2.6.5
+gradio==4.44.1
+ffmpeg-python==0.2.0
+onnxruntime-gpu==1.27.0
+tqdm==4.68.3
+funasr==1.3.13
+cn2an==0.5.24
+pypinyin==0.55.0
+g2p-en==2.1.0
+modelscope==1.37.1
+sentencepiece==0.2.1
+transformers==4.44.2
+peft==0.17.1
+chardet==7.4.3
+PyYAML==6.0.3
+psutil==7.2.2
+jieba==0.42.1
+split-lang==2.1.1
+fast-langdetect==1.0.1
+wordsegment==1.3.1
+rotary-embedding-torch==0.9.1
+ToJyutping==3.2.0
+g2pk2==0.0.3
+fastapi==0.138.0
+x-transformers==2.22.6
+torchmetrics==1.5.0
+pydantic==2.10.6
+ctranslate2==4.8.0
+av==17.1.0
+
+# pip_worker 单独补装的替代品 / 遗漏包
+pyopenjtalk-plus==0.4.1.post8
+opencc-python-reimplemented==0.1.7

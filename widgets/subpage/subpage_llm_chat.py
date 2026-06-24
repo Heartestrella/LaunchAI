@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QKeyEvent, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
     QSizePolicy, QFrame,
@@ -1709,7 +1709,8 @@ class ToolCallCard(CardWidget):
         self._progress_lbl.setStyleSheet(f"color: {INK_TERTIARY};")
         v.addWidget(self._progress_lbl)
 
-        # 结果
+        # 结果 —— 短结果直接显示;长结果(>150 字符 或多行) 折叠成
+        # "首行摘要 + ▾ 展开详细输出" 卡片,避免几十行 cli stack 撑爆消息列表。
         self._result_lbl = BodyLabel("", self)
         self._result_lbl.setWordWrap(True)
         self._result_lbl.setStyleSheet(f"color: {INK_PRIMARY};")
@@ -1718,6 +1719,46 @@ class ToolCallCard(CardWidget):
         self._result_lbl.setVisible(False)
         v.addWidget(self._result_lbl)
 
+        # 详情折叠头(默认隐藏,长结果时才显示)
+        self._detail_header = _ClickableFrame(self)
+        self._detail_header.setObjectName("DetailHeader")
+        self._detail_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._detail_header.setStyleSheet(
+            "#DetailHeader { background: transparent; border: none; }"
+            "#DetailHeader:hover { background: rgba(255,255,255,0.05); border-radius: 6px; }"
+        )
+        dh = QHBoxLayout(self._detail_header)
+        dh.setContentsMargins(6, 4, 6, 4)
+        dh.setSpacing(6)
+        self._detail_chev = IconWidget(ICON_CHEV_R, self._detail_header)
+        self._detail_chev.setFixedSize(10, 10)
+        dh.addWidget(self._detail_chev, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._detail_title = CaptionLabel("详细输出", self._detail_header)
+        self._detail_title.setStyleSheet(f"color: {INK_SECONDARY};")
+        dh.addWidget(self._detail_title, 0, Qt.AlignmentFlag.AlignVCenter)
+        dh.addStretch()
+        self._detail_header.setVisible(False)
+        self._detail_header.clicked.connect(self._toggle_detail)
+        v.addWidget(self._detail_header)
+
+        # 详情正文(monospace + 限高,默认折叠)
+        self._detail_body = TextEdit(self)
+        self._detail_body.setReadOnly(True)
+        self._detail_body.setAcceptRichText(False)
+        self._detail_body.setStyleSheet(
+            "TextEdit { "
+            "background-color: rgba(0,0,0,0.25); "
+            "color: #d4d4d4; "
+            "font-family: Consolas, 'Microsoft YaHei', monospace; "
+            "font-size: 11px; "
+            "border: 1px solid rgba(255,255,255,0.08); "
+            "border-radius: 6px; "
+            "}"
+        )
+        self._detail_body.setMaximumHeight(220)
+        self._detail_body.setVisible(False)
+        v.addWidget(self._detail_body)
+
         # 媒体结果区 —— set_media_results() 往里放 AudioWaveformWidget / VideoWidget
         self._media_box = QVBoxLayout()
         self._media_box.setSpacing(8)
@@ -1725,6 +1766,11 @@ class ToolCallCard(CardWidget):
         v.addLayout(self._media_box)
 
         self._apply_pill(*self.PILL_RUNNING)
+
+    def _toggle_detail(self):
+        opened = not self._detail_body.isVisible()
+        self._detail_body.setVisible(opened)
+        self._detail_chev.setIcon(ICON_CHEV_D if opened else ICON_CHEV_R)
 
     def _apply_pill(self, bg: str, fg: str):
         self._status_pill.setStyleSheet(
@@ -1739,6 +1785,10 @@ class ToolCallCard(CardWidget):
             line = line[:200] + "…"
         self._progress_lbl.setText(line)
 
+    # 长结果阈值:超过这两个之一就走折叠 UI,只显示首行摘要
+    _DETAIL_MAX_CHARS = 150
+    _DETAIL_MAX_LINES = 2
+
     def set_done(self, ok: bool, result: str):
         if ok:
             self._apply_pill(*self.PILL_OK)
@@ -1747,8 +1797,32 @@ class ToolCallCard(CardWidget):
             self._apply_pill(*self.PILL_FAIL)
             self._status_lbl.setText("失败")
         self._progress_lbl.setText("")
-        self._result_lbl.setText(("✓ " if ok else "✗ ") + (result or "(无返回)"))
-        self._result_lbl.setVisible(True)
+
+        body = result or "(无返回)"
+        lines = body.splitlines()
+        is_long = len(body) > self._DETAIL_MAX_CHARS or len(lines) > self._DETAIL_MAX_LINES
+
+        if is_long:
+            # 首行/首段当摘要,完整内容塞详情折叠区
+            summary = lines[0].strip() if lines else body
+            if len(summary) > self._DETAIL_MAX_CHARS:
+                summary = summary[: self._DETAIL_MAX_CHARS] + "…"
+            self._result_lbl.setText(("✓ " if ok else "✗ ") + summary)
+            self._result_lbl.setVisible(True)
+
+            self._detail_body.setPlainText(body)
+            # 滚到顶,失败的 stack trace 第一行最重要
+            self._detail_body.moveCursor(QTextCursor.MoveOperation.Start)
+            self._detail_title.setText(f"详细输出 ({len(lines)} 行)")
+            self._detail_header.setVisible(True)
+            # 默认折叠;失败时给个轻提示(标题文案)但仍不展开,避免一次摊开太多
+            self._detail_body.setVisible(False)
+            self._detail_chev.setIcon(ICON_CHEV_R)
+        else:
+            self._result_lbl.setText(("✓ " if ok else "✗ ") + body)
+            self._result_lbl.setVisible(True)
+            self._detail_header.setVisible(False)
+            self._detail_body.setVisible(False)
 
     # 媒体结果区扩展 -----------------------------------------------------------
     # 支持的可内嵌后缀。NOTE: AudioWaveformWidget 走 soundfile 解码,m4a/aac
@@ -2705,7 +2779,11 @@ class LLMChatPage(QWidget):
         if role == "assistant":
             bubble.copy_requested.connect(self._on_copy_assistant)
         self.msg_layout.insertWidget(self.msg_layout.count() - 1, bubble)
-        QTimer.singleShot(30, self._scroll_to_bottom)
+        # 用户刚发消息时强制滚到底(显然要看到自己的输入);
+        # 助手新建空气泡时遵循"用户是否在底部"的判断 —— 用户正在翻历史
+        # 就不要把他拉走。
+        force = (role == "user")
+        QTimer.singleShot(30, lambda: self._scroll_to_bottom(force=force))
         return bubble
 
     def _on_copy_assistant(self):
@@ -2713,8 +2791,17 @@ class LLMChatPage(QWidget):
                         parent=self, duration=1200,
                         position=InfoBarPosition.TOP_RIGHT)
 
-    def _scroll_to_bottom(self):
+    # 用户向上滚开多少像素后就停止"跟随到底"。约等于一行半,
+    # 既能容忍最后一行刚好被新内容顶超出的瞬时差,又能让用户主动
+    # 往上滚一点就脱离自动滚动。
+    _AUTO_SCROLL_STICKY_PX = 64
+
+    def _scroll_to_bottom(self, force: bool = False):
         bar = self.scroll.verticalScrollBar()
+        if not force:
+            # 距离底部超过阈值 = 用户已经主动滚开,这种情况下绝不强制拉回底部
+            if (bar.maximum() - bar.value()) > self._AUTO_SCROLL_STICKY_PX:
+                return
         bar.setValue(bar.maximum())
 
     def _set_busy(self, busy: bool):
@@ -2812,6 +2899,19 @@ class LLMChatPage(QWidget):
                 {"name": name, "ok": False, "result": f"未知工具: {name}"})
             self._run_next_tool()
             return
+        # 工具底层包就绪检查:没装就让卡片直接报"请去 XX 页装",
+        # 不让 worker 的 subprocess ModuleNotFoundError 整页 stack 污染对话
+        from utils.tool_ready import check as _check_tool_ready
+        not_ready = _check_tool_ready(name)
+        if not_ready:
+            self._add_tool_card(name, args)
+            if self._current_tool_card:
+                self._current_tool_card.set_done(False, not_ready)
+                self._current_tool_card = None
+            self._tool_results.append(
+                {"name": name, "ok": False, "result": not_ready})
+            self._run_next_tool()
+            return
         try:
             self._add_tool_card(name, args)
             handler(args)  # 应当启动 worker,异步触发 _on_tool_done
@@ -2882,6 +2982,21 @@ class LLMChatPage(QWidget):
             return out
         return []
 
+    # tool_result 喂回 LLM 时单条最长允许的字符数 —— 失败 worker 的 stack trace
+        # 经常上千字符,全塞回去会迅速把模型上下文撑满且让模型注意力被噪音带跑。
+        # 长结果只保留首部 + 末部(末部往往包含真正的错误信息),中间用一行省略。
+    _LLM_RESULT_MAX = 600
+    _LLM_RESULT_HEAD = 240
+    _LLM_RESULT_TAIL = 320
+
+    def _truncate_for_llm(self, text: str) -> str:
+        if not text or len(text) <= self._LLM_RESULT_MAX:
+            return text
+        head = text[: self._LLM_RESULT_HEAD]
+        tail = text[-self._LLM_RESULT_TAIL :]
+        omitted = len(text) - self._LLM_RESULT_HEAD - self._LLM_RESULT_TAIL
+        return f"{head}\n…(省略 {omitted} 字符 中间内容,用户可在工具卡片展开详情查看)…\n{tail}"
+
     def _continue_dialog_with_tool_results(self):
         """所有工具跑完:把结果以 user 消息送回 LLM,启动下一轮回复。"""
         parts = []
@@ -2889,9 +3004,10 @@ class LLMChatPage(QWidget):
             status = "ok" if r["ok"] else "error"
             # 转义最小: <tool_result> 内容里如果含 `</tool_result>` 会破坏解析,
             # 但模型不会把它写回提示,且用户上下文里不太会自然出现这个字串,先不做转义。
+            result_text = self._truncate_for_llm(str(r["result"]))
             parts.append(
                 f'<tool_result name="{r["name"]}" status="{status}">'
-                f'{r["result"]}'
+                f'{result_text}'
                 f'</tool_result>'
             )
         tool_msg = "\n".join(

@@ -9,7 +9,7 @@ torch_cache/
 _git_projects/*
 results/
 CLAUDE.md
-py311_embed/
+py311/
 output/
 htdemucs/
 transcripts/
