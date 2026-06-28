@@ -63,6 +63,41 @@ class AudiocraftWorker(QThread):
             return [str(p).strip() for p in prompts if str(p).strip()]
         return []
 
+    # ── Qt-free 调用核(GUI 的 run() 与 HTTP API 共用) ──────────────────
+    @staticmethod
+    def prompt_list(params: dict) -> list:
+        prompts = params.get("prompts")
+        if prompts is None:
+            prompts = params.get("prompt", "")
+        if isinstance(prompts, str):
+            return [p.strip() for p in prompts.splitlines() if p.strip()]
+        if isinstance(prompts, list):
+            return [str(p).strip() for p in prompts if str(p).strip()]
+        return []
+
+    @staticmethod
+    def build_argv(params: dict, prompts: list, output_dir: str) -> list:
+        """构建 audiocraft runner 命令(指向 _audiocraft_runner.py)。GUI / API 共用。"""
+        task = params.get("task", "musicgen")
+        model = params.get("model") or ("small" if task == "musicgen" else "medium")
+        melody = params.get("melody") or ""
+        cmd = [sys.executable, _RUNNER,
+               "--task", task,
+               "--model", model,
+               "--device", params.get("device", "cuda"),
+               "--duration", str(float(params.get("duration", 8.0))),
+               "--top-k", str(int(params.get("top_k", 250))),
+               "--top-p", str(float(params.get("top_p", 0.0))),
+               "--temperature", str(float(params.get("temperature", 1.0))),
+               "--cfg-coef", str(float(params.get("cfg_coef", 3.0))),
+               "--output-dir", output_dir,
+               "--output-format", params.get("output_format", "wav")]
+        for p in prompts:
+            cmd.extend(["--prompt", p])
+        if melody and task == "musicgen":
+            cmd.extend(["--melody", melody])
+        return cmd
+
     def run(self):
         try:
             task = self.params.get("task", "musicgen")
@@ -80,29 +115,8 @@ class AudiocraftWorker(QThread):
 
             model = self.params.get("model") or ("small" if task == "musicgen" else "medium")
             device = self.params.get("device", "cuda")
-            melody = self.params.get("melody") or ""
-            output_format = self.params.get("output_format", "wav")
-            duration = float(self.params.get("duration", 8.0))
-            top_k = int(self.params.get("top_k", 250))
-            top_p = float(self.params.get("top_p", 0.0))
-            temperature = float(self.params.get("temperature", 1.0))
-            cfg_coef = float(self.params.get("cfg_coef", 3.0))
 
-            cmd = [sys.executable, _RUNNER,
-                   "--task", task,
-                   "--model", model,
-                   "--device", device,
-                   "--duration", str(duration),
-                   "--top-k", str(top_k),
-                   "--top-p", str(top_p),
-                   "--temperature", str(temperature),
-                   "--cfg-coef", str(cfg_coef),
-                   "--output-dir", output_dir,
-                   "--output-format", output_format]
-            for p in prompts:
-                cmd.extend(["--prompt", p])
-            if melody and task == "musicgen":
-                cmd.extend(["--melody", melody])
+            cmd = self.build_argv(self.params, prompts, output_dir)
 
             self.progress.emit(0, "准备启动 audiocraft…")
             self.output.emit(_html(f"任务: {task}", "#888888"))

@@ -50,6 +50,70 @@ class DemucsWorker(QThread):
             style.append("font-weight:bold")
         return f'<span style="{";".join(style)}">{text}</span>'
 
+    # ── Qt-free 调用核(GUI 的 run() 与 HTTP API 共用) ──────────────────
+    @staticmethod
+    def build_argv(params: dict) -> list:
+        """根据参数字典构建 demucs.separate 命令行。
+
+        与 run() 共用同一份参数→argv 逻辑,HTTP API 也直接调它,避免两套漂移。
+        不读文件、不依赖 Qt;仅拼 argv。
+        """
+        output_dir = params.get('output') or _paths.output_dir("demucs")
+        model = params.get('model', 'htdemucs')
+        device = params.get('device', 'cuda')
+        shifts = params.get('shifts', 1)
+        segment = params.get('segment', 10)
+        overlap = params.get('overlap', 0.25)
+        fmt = params.get('format', 'wav')
+        tracks = params.get('tracks', {})
+        two_stems = params.get('two_stems', None)
+
+        cmd = [sys.executable, "-m", "demucs.separate"]
+        cmd.extend(["-n", model])
+        cmd.extend(["-d", device])
+        cmd.extend(["-o", output_dir])
+
+        if shifts and shifts > 1:
+            cmd.extend(["--shifts", str(shifts)])
+        if segment and segment < 20:
+            cmd.extend(["--segment", str(segment)])
+        if overlap is not None and overlap != 0.25:
+            cmd.extend(["--overlap", str(overlap)])
+
+        if fmt == 'mp3':
+            cmd.append("--mp3")
+        elif fmt == 'flac':
+            cmd.append("--flac")
+
+        if two_stems:
+            cmd.extend(["--two-stems", two_stems])
+        else:
+            stems = [s for s in ('vocals', 'drums', 'bass', 'other')
+                     if tracks.get(s)]
+            if stems and len(stems) < 4:
+                cmd.extend(["--stem", ",".join(stems)])
+
+        cmd.append(params.get('input'))
+        return cmd
+
+    @staticmethod
+    def result_dir(params: dict) -> str:
+        """完成后实际产物所在目录: <output>/<model>/<输入文件名(无扩展)>/。"""
+        output_dir = params.get('output') or _paths.output_dir("demucs")
+        model = params.get('model', 'htdemucs')
+        track_name = os.path.splitext(os.path.basename(params.get('input', '')))[0]
+        return os.path.join(output_dir, model, track_name)
+
+    @staticmethod
+    def parse_percent(line: str):
+        """从一行输出里抽进度百分比,抽不到返回 None。GUI / API 共用。"""
+        if '%' in line and ('|' in line or '[' in line):
+            import re
+            m = re.search(r'(\d+)%', line)
+            if m:
+                return int(m.group(1))
+        return None
+
     def run(self):
         """执行分离任务"""
         try:
@@ -61,59 +125,9 @@ class DemucsWorker(QThread):
 
             output_dir = self.params.get('output') or _paths.output_dir("demucs")
             model = self.params.get('model', 'htdemucs')
-            device = self.params.get('device', 'cuda')
-            shifts = self.params.get('shifts', 1)
-            segment = self.params.get('segment', 10)
-            overlap = self.params.get('overlap', 0.25)
-            fmt = self.params.get('format', 'wav')
-            tracks = self.params.get('tracks', {})
-            two_stems = self.params.get('two_stems', None)
 
-            # 构建 demucs 命令
-            cmd = [sys.executable, "-m", "demucs.separate"]
-
-            # 基本参数
-            cmd.extend(["-n", model])           # 模型
-            cmd.extend(["-d", device])          # 设备
-            cmd.extend(["-o", output_dir])      # 输出目录
-
-            # 可选参数
-            if shifts > 1:
-                cmd.extend(["--shifts", str(shifts)])
-
-            if segment < 20:
-                cmd.extend(["--segment", str(segment)])
-
-            if overlap != 0.25:
-                cmd.extend(["--overlap", str(overlap)])
-
-            # 输出格式
-            if fmt == 'mp3':
-                cmd.append("--mp3")
-            elif fmt == 'flac':
-                cmd.append("--flac")
-
-            # 音轨选择
-            if two_stems:
-                cmd.extend(["--two-stems", two_stems])
-            else:
-                # 选择要分离的音轨
-                stems = []
-                if tracks.get('vocals'):
-                    stems.append('vocals')
-                if tracks.get('drums'):
-                    stems.append('drums')
-                if tracks.get('bass'):
-                    stems.append('bass')
-                if tracks.get('other'):
-                    stems.append('other')
-
-                if stems and len(stems) < 4:
-                    # 只分离选中的音轨
-                    cmd.extend(["--stem", ",".join(stems)])
-
-            # 输入文件
-            cmd.append(input_path)
+            # 构建 demucs 命令(与 API 共用 build_argv)
+            cmd = self.build_argv(self.params)
 
             # 输出命令信息
             self.progress.emit(0, "准备开始分离...")

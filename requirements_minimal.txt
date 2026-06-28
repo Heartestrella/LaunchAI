@@ -25,3 +25,9 @@ dulwich==1.2.6
 
 # ---- 网易云 weapi 加密 (utils/_netease_weapi.py 登录用) ----
 pycryptodome==3.23.0
+
+# ---- HTTP API 服务 (server/ 把工具开放成 FastAPI 接口) ----
+# 已随工具依赖装在 py311,此处登记;SSE 用 StreamingResponse 手写,不引入 sse-starlette
+fastapi==0.137.1
+uvicorn==0.49.0
+python-multipart==0.0.32

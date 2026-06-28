@@ -3,7 +3,7 @@ import os
 from PyQt6.QtWidgets import QStackedLayout, QVBoxLayout, QWidget
 from PyQt6.QtCore import Qt
 from qfluentwidgets import InfoBar, BodyLabel, IconWidget, TitleLabel, PrimaryPushButton, FluentIcon as FIF
-from workers.pip_worker import PipWorker
+from workers.pip_worker import PipWorker, GIT_PROJECTS_ROOT, fork_map
 from utils.configer import get_field
 import re
 from PyQt6.QtCore import QUrl, QTimer, pyqtSignal
@@ -24,6 +24,21 @@ else:
     error(f"未找到realesrgan-ncnn-vulkan 可能需要从源码安装")
 
 info("获取CUDA DRIVER中")
+
+
+def _repo_tool_installed(pkg: str) -> bool:
+    """仓库式工具(Applio / GPT-SoVITS)的安装检测。
+
+    优先看 PipWorker 写入的 installed flag;但「项目部署安装」时 flag 可能
+    从没被写过(配置被重置 / 旧版本装的),此时回退到 _git_projects/<pkg>_<fork>
+    克隆目录是否存在 —— 目录在就是真装了,避免明明部署了却显示「未安装」。
+    """
+    if bool(get_field(f"installed.{pkg}", False)):
+        return True
+    fork = fork_map.get(pkg)
+    if not fork:
+        return False
+    return os.path.isdir(os.path.join(GIT_PROJECTS_ROOT, f"{pkg}_{fork}"))
 
 
 class LogTextEdit(TextEdit):
@@ -455,9 +470,10 @@ class SwitchPage(QWidget):
         self.stacked_layout.addWidget(self._real_page_0)
         self.stacked_layout.addWidget(self._real_page_1)
         self._real_page_0.finish.connect(lambda: self.switch_page(1))
-        # 读 PipWorker 安装成功时写入的 flag，比扫目录可靠（克隆中断也不会误判）
-        installed = bool(get_field("installed.Applio", False))
-        info(f"Applio 安装检测: installed.Applio={installed}")
+        # 读 PipWorker 安装成功时写入的 flag，比扫目录可靠（克隆中断也不会误判）；
+        # flag 缺失时回退到克隆目录是否存在，兼容「项目部署安装」但 flag 没写的情况
+        installed = _repo_tool_installed("Applio")
+        info(f"Applio 安装检测: installed={installed}")
         self.switch_page(1 if installed else 0)
 
     def handel_iopaint(self):
@@ -481,9 +497,9 @@ class SwitchPage(QWidget):
         self.stacked_layout.addWidget(self._real_page_0)
         self.stacked_layout.addWidget(self._real_page_1)
         self._real_page_0.finish.connect(lambda: self.switch_page(1))
-        # 与 Applio 一致：以 PipWorker 写入的 installed flag 为准
-        installed = bool(get_field("installed.GPT-SoVITS", False))
-        info(f"GPT-SoVITS 安装检测: installed.GPT-SoVITS={installed}")
+        # 与 Applio 一致：flag 优先，缺失时回退克隆目录存在性
+        installed = _repo_tool_installed("GPT-SoVITS")
+        info(f"GPT-SoVITS 安装检测: installed={installed}")
         self.switch_page(1 if installed else 0)
 
     def handel_audiocraft(self):

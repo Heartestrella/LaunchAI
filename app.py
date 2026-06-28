@@ -325,13 +325,31 @@ def main():
     setTheme(Theme.DARK)
     font_id = QFontDatabase.addApplicationFont(
         resource_path(os.path.join("resource", "JetBrainsMapleMono-BoldItalic.ttf")))
-    font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
-
-    font = QFont(font_family)
-    font.setPointSize(10)
-    app.setFont(font)
+    if font_id != -1:
+        font_family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        font = QFont(font_family)
+        font.setPointSize(10)
+        # 不强制 Bold/Italic，让控件按需设置
+        font.setWeight(QFont.Weight.Normal)
+        font.setItalic(False)
+        app.setFont(font)
+    else:
+        warning("字体加载失败，使用系统默认字体")
     window = Window()
     window.show()
+
+    # 可选:按配置自启动 HTTP API 服务(api_server.autostart 且已设 Key)。
+    # 在 QApplication 之后启动,server 里实例化 Qt worker 才安全。
+    try:
+        if bool(get_field("api_server.autostart", False)) \
+                and (get_field("api_server.api_key", "") or "").strip():
+            from server.api_server import ApiServerManager
+            ApiServerManager.instance().start(
+                get_field("api_server.host", "127.0.0.1") or "127.0.0.1",
+                int(get_field("api_server.port", 8765) or 8765))
+    except Exception as e:
+        warning(f"[api] 自启动失败: {e}")
+
     app.exec()
 
 

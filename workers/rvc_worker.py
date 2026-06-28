@@ -66,6 +66,53 @@ class RVCInferWorker(QThread):
             return [input_param]
         return []
 
+    # ── Qt-free 调用核(GUI 的 run() 与 HTTP API 共用) ──────────────────
+    @staticmethod
+    def file_list(params: dict) -> list:
+        ip = params.get('input')
+        if isinstance(ip, list):
+            return ip
+        if isinstance(ip, str):
+            return [ip]
+        return []
+
+    @staticmethod
+    def output_path(params: dict, input_path: str) -> str:
+        output_dir = params.get('output') or _paths.output_dir("rvc")
+        fmt = params.get('format', 'wav')
+        return os.path.join(output_dir, f"{Path(input_path).stem}_rvc.{fmt}")
+
+    @staticmethod
+    def build_argv(params: dict, input_path: str, out_path: str) -> list:
+        """构建单文件的 RVC runner 命令(指向 _rvc_runner.py)。GUI / API 共用。"""
+        index_path = params.get('index_path', '') or ''
+        cmd = [sys.executable, _INFER_RUNNER,
+               "--input",         input_path,
+               "--output",        out_path,
+               "--model-path",    params.get('model_path', ''),
+               "--device",        params.get('device', 'cuda:0'),
+               "--f0-method",     params.get('f0_method', 'rmvpe'),
+               "--transpose",     str(int(params.get('transpose', 0))),
+               "--index-rate",    str(float(params.get('index_rate', 0.75))),
+               "--filter-radius", str(int(params.get('filter_radius', 3))),
+               "--resample-sr",   str(int(params.get('resample_sr', 0))),
+               "--rms-mix-rate",  str(float(params.get('rms_mix_rate', 0.25))),
+               "--protect",       str(float(params.get('protect', 0.33)))]
+        if index_path:
+            cmd.extend(["--index-path", index_path])
+        if bool(params.get('split_infer', False)):
+            cmd.append("--split-infer")
+        return cmd
+
+    @staticmethod
+    def parse_percent(line: str):
+        if '%' in line:
+            import re
+            m = re.search(r'(\d+)%', line)
+            if m:
+                return int(m.group(1))
+        return None
+
     def run(self):
         try:
             file_list = self._get_file_list()
@@ -128,23 +175,7 @@ class RVCInferWorker(QThread):
                 out_path = os.path.join(
                     output_dir, f"{file_name}_rvc.{fmt}")
 
-                cmd = [sys.executable, _INFER_RUNNER,
-                       "--input",         input_path,
-                       "--output",        out_path,
-                       "--model-path",    model_path,
-                       "--device",        device,
-                       "--f0-method",     f0_method,
-                       "--transpose",     str(transpose),
-                       "--index-rate",    str(index_rate),
-                       "--filter-radius", str(filter_radius),
-                       "--resample-sr",   str(resample_sr),
-                       "--rms-mix-rate",  str(rms_mix_rate),
-                       "--protect",       str(protect)]
-
-                if index_path:
-                    cmd.extend(["--index-path", index_path])
-                if split_infer:
-                    cmd.append("--split-infer")
+                cmd = self.build_argv(self.params, input_path, out_path)
 
                 self.output.emit(_html(
                     f"执行命令: {' '.join(cmd)}", "#888888"))

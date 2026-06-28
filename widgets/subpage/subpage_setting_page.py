@@ -2,13 +2,14 @@ import sys
 from logger import info, warning, debug, error
 from PyQt6.QtGui import QDesktopServices, QTextCursor
 from PyQt6.QtCore import QUrl, QThread, pyqtSignal
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame, QStackedWidget, QLabel, QApplication
 from PyQt6.QtCore import Qt
 from qfluentwidgets import (
     SettingCard, FluentIcon as FIF, ElevatedCardWidget, TextEdit, ComboBox,
     EditableComboBox, LineEdit, PasswordLineEdit, SwitchButton,
     PushButton, PrimaryPushButton, ToolTipFilter, IconWidget, MessageBox, InfoBar,
     StrongBodyLabel, BodyLabel, CaptionLabel, SingleDirectionScrollArea,
+    ExpandGroupSettingCard, PrimaryToolButton, ToolButton,
 )
 from workers.pip_worker import PipWorker
 from utils.configer import get_field, set_field
@@ -19,6 +20,38 @@ CUDA_MAP = {"CPU": "cpu", "CUDA11.8": "118", "CUDA12.4": "124",
 MIRROR_MAP = {"阿里云镜像源": "https://mirrors.aliyun.com/pytorch-wheels",
               "清华大学镜像源": "https://pypi.tuna.tsinghua.edu.cn/simple",
               "官方Pytorch源": "https://download.pytorch.org/whl"}
+
+
+def apply_app_font(root: QWidget):
+    """把 qfluentwidgets 卡片里写死成 Segoe UI 的标题/内容标签字体族换成 app 全局字体。
+
+    app.py 启动时 ``app.setFont`` 把全局字体设成 JetBrains Maple Mono,但 qfluentwidgets
+    的 SettingCard / ExpandGroupSettingCard 会通过卡片 QSS 的 ``font:`` 简写给子 QLabel 设
+    Segoe UI,优先级高于 app.setFont,导致卡片标题字体和应用其它部分不一致。这里在 label
+    级用 inline stylesheet 只覆写 font-family(inline 优先级最高),保留各自原有字号/颜色。
+    日志等显式 monospace 的标签跳过;LogTextEdit 不是 QLabel 不受影响。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    family = app.font().family()
+    if not family:
+        return
+    for lbl in root.findChildren(QLabel):
+        ss = lbl.styleSheet()
+        low = ss.lower()
+        if "monospace" in low or "consolas" in low:
+            continue
+        f = lbl.font()
+        px, pt = f.pixelSize(), f.pointSize()
+        if px > 0:
+            size_rule = f"font-size:{px}px;"
+        elif pt > 0:
+            size_rule = f"font-size:{pt}pt;"
+        else:
+            size_rule = ""
+        prefix = (ss + ";") if ss and not ss.rstrip().endswith(";") else ss
+        lbl.setStyleSheet(f"{prefix}font-family:'{family}';{size_rule}")
 
 
 class HelpIcon(IconWidget):
@@ -298,7 +331,7 @@ class _UserInfoWorker(QThread):
             self.bilibili.emit(None)
 
 
-class MaterialsAccountCard(ElevatedCardWidget):
+class MaterialsAccountCard(ExpandGroupSettingCard):
     """素材库账户管理卡片 —— 两个平台共用一张卡 内部分两行"""
 
     PLATFORMS = (
@@ -307,61 +340,58 @@ class MaterialsAccountCard(ElevatedCardWidget):
     )
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 16, 22, 16)
-        root.setSpacing(12)
+        super().__init__(FIF.DOWNLOAD, "素材库账户",
+                         "登录账号后可解锁更高画质 (B 站 1080P+) 和更高命中率 (网易云 VIP / 付费曲目)，"
+                         "登录凭据仅保存在本机 configs/config.json。",
+                         parent)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        head.addWidget(IconWidget(FIF.DOWNLOAD, self))
-        head.addWidget(StrongBodyLabel("素材库账户", self))
-        head.addStretch()
-        root.addLayout(head)
-
-        root.addWidget(CaptionLabel(
-            "登录账号后可解锁更高画质 (B 站 1080P+) 和更高命中率 (网易云 VIP / 付费曲目)，"
-            "登录凭据仅保存在本机 configs/config.json。", self
-        ))
+        # 调整内部布局
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
 
         self._rows: dict[str, dict] = {}
         for key, name, icon in self.PLATFORMS:
-            row = self._build_row(key, name, icon)
-            root.addLayout(row)
+            item = self._build_item(key, name, icon)
+            self.addGroupWidget(item)
 
         # 启动时异步刷新一次
         self._refresh()
 
-    def _build_row(self, key: str, name: str, icon) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(10)
+    def _build_item(self, key: str, name: str, icon) -> QWidget:
+        """构建单个平台的登录控件行"""
+        item = QWidget(self)
+        layout = QHBoxLayout(item)
+        layout.setContentsMargins(20, 12, 20, 12)
+        layout.setSpacing(10)
+
         icw = IconWidget(icon, self)
         icw.setFixedSize(20, 20)
-        row.addWidget(icw)
+        layout.addWidget(icw)
+
         name_lbl = BodyLabel(name, self)
         name_lbl.setMinimumWidth(96)
-        row.addWidget(name_lbl)
+        layout.addWidget(name_lbl)
 
         status_lbl = CaptionLabel("检查中…", self)
-        row.addWidget(status_lbl, 1)
+        layout.addWidget(status_lbl, 1)
 
         login_btn = PrimaryPushButton("登录", self, FIF.LINK)
         login_btn.setFixedWidth(96)
         login_btn.clicked.connect(lambda _=False, k=key: self._on_login(k))
-        row.addWidget(login_btn)
+        layout.addWidget(login_btn)
 
         logout_btn = PushButton("退出登录", self)
         logout_btn.setFixedWidth(96)
         logout_btn.clicked.connect(lambda _=False, k=key: self._on_logout(k))
         logout_btn.setVisible(False)
-        row.addWidget(logout_btn)
+        layout.addWidget(logout_btn)
 
         self._rows[key] = {
             "status":  status_lbl,
             "login":   login_btn,
             "logout":  logout_btn,
         }
-        return row
+        return item
 
     # ── 状态刷新 ───────────────────────────────────────────────────
 
@@ -436,7 +466,7 @@ class MaterialsAccountCard(ElevatedCardWidget):
         self._refresh()
 
 
-class LLMConfigCard(ElevatedCardWidget):
+class LLMConfigCard(ExpandGroupSettingCard):
     """LLM 服务配置卡片 —— 给节点编辑器里的「LLM 提示词」节点用。
 
     与内置聊天页(subpage_llm_chat)共享同一份配置 ``configs/config.json::llm_chat``;
@@ -449,22 +479,14 @@ class LLMConfigCard(ElevatedCardWidget):
     # cannot be started from another thread" 通常是 worker parent 串错,这里
     # 不传 parent 用 self 持引用即可。
     def __init__(self, parent=None):
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 16, 22, 16)
-        root.setSpacing(10)
+        super().__init__(FIF.EDUCATION, "LLM 服务配置",
+                         "用于节点编辑器中的「LLM 提示词」节点(同时也是聊天页的服务配置)。"
+                         "API Key 仅保存在本机 configs/config.json。",
+                         parent)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        head.addWidget(IconWidget(FIF.EDUCATION, self))
-        head.addWidget(StrongBodyLabel("LLM 服务配置", self))
-        head.addStretch()
-        root.addLayout(head)
-
-        root.addWidget(CaptionLabel(
-            "用于节点编辑器中的「LLM 提示词」节点(同时也是聊天页的服务配置)。"
-            "API Key 仅保存在本机 configs/config.json。", self
-        ))
+        # 调整内部布局
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
 
         # 懒导入:避免 settings 模块顶部强拉聊天页(它会顺带 import 一大票
         # qfluentwidgets 与正则、urllib 等;放到这里只有打开设置页才付出代价)
@@ -473,62 +495,51 @@ class LLMConfigCard(ElevatedCardWidget):
         self._ModelListWorker = ModelListWorker
 
         # ── 服务商 ──────────────────────────────────────────────────────
-        row_provider = QHBoxLayout()
-        row_provider.setSpacing(10)
-        lbl_p = BodyLabel("服务商", self)
-        lbl_p.setMinimumWidth(70)
-        row_provider.addWidget(lbl_p)
         self.provider_box = ComboBox(self)
         self.provider_box.addItems(list(self._presets.keys()))
         self.provider_box.currentTextChanged.connect(self._on_provider_changed)
-        row_provider.addWidget(self.provider_box, 1)
-        root.addLayout(row_provider)
+        self.provider_box.setFixedWidth(220)
 
         # ── Base URL ───────────────────────────────────────────────────
-        row_url = QHBoxLayout()
-        row_url.setSpacing(10)
-        lbl_u = BodyLabel("Base URL", self)
-        lbl_u.setMinimumWidth(70)
-        row_url.addWidget(lbl_u)
         self.url_edit = LineEdit(self)
         self.url_edit.setPlaceholderText("https://api.example.com/v1")
-        row_url.addWidget(self.url_edit, 1)
-        root.addLayout(row_url)
+        self.url_edit.setFixedWidth(280)
 
         # ── API Key ────────────────────────────────────────────────────
-        row_key = QHBoxLayout()
-        row_key.setSpacing(10)
-        lbl_k = BodyLabel("API Key", self)
-        lbl_k.setMinimumWidth(70)
-        row_key.addWidget(lbl_k)
         self.key_edit = PasswordLineEdit(self)
         self.key_edit.setPlaceholderText("sk-...")
-        row_key.addWidget(self.key_edit, 1)
-        root.addLayout(row_key)
+        self.key_edit.setFixedWidth(280)
 
         # ── 模型 + 拉取按钮 ────────────────────────────────────────────
-        row_model = QHBoxLayout()
-        row_model.setSpacing(10)
-        lbl_m = BodyLabel("模型", self)
-        lbl_m.setMinimumWidth(70)
-        row_model.addWidget(lbl_m)
+        model_widget = QWidget(self)
+        model_layout = QHBoxLayout(model_widget)
+        model_layout.setContentsMargins(20, 12, 20, 12)
+        model_layout.setSpacing(8)
+        model_layout.addWidget(BodyLabel("模型", self))
         self.model_box = EditableComboBox(self)
         self.model_box.setPlaceholderText("手动填写或点右侧按钮拉取")
-        row_model.addWidget(self.model_box, 1)
+        model_layout.addWidget(self.model_box, 1)
         self.fetch_btn = PushButton("拉取模型", self, FIF.SYNC)
         self.fetch_btn.setFixedWidth(110)
         self.fetch_btn.clicked.connect(self._on_fetch_models)
-        row_model.addWidget(self.fetch_btn)
-        root.addLayout(row_model)
+        model_layout.addWidget(self.fetch_btn)
 
         # ── 保存按钮 ───────────────────────────────────────────────────
-        row_btn = QHBoxLayout()
-        row_btn.addStretch()
+        save_widget = QWidget(self)
+        save_layout = QHBoxLayout(save_widget)
+        save_layout.setContentsMargins(20, 12, 20, 12)
+        save_layout.addStretch()
         self.save_btn = PrimaryPushButton("保存", self, FIF.SAVE)
         self.save_btn.setFixedWidth(110)
         self.save_btn.clicked.connect(self._on_save)
-        row_btn.addWidget(self.save_btn)
-        root.addLayout(row_btn)
+        save_layout.addWidget(self.save_btn)
+
+        # 添加各组到手风琴卡中
+        self.addGroup(FIF.ROBOT, "服务商", "选择预设服务商自动填充", self.provider_box)
+        self.addGroup(FIF.LINK, "Base URL", "API 接口地址", self.url_edit)
+        self.addGroup(FIF.VPN, "API Key", "密钥仅保存在本机", self.key_edit)
+        self.addGroupWidget(model_widget)
+        self.addGroupWidget(save_widget)
 
         self._model_worker = None
         self._load_from_config()
@@ -645,7 +656,7 @@ class LLMConfigCard(ElevatedCardWidget):
                       parent=self.window(), duration=5000)
 
 
-class LazyStartupCard(ElevatedCardWidget):
+class LazyStartupCard(ExpandGroupSettingCard):
     """启动行为:懒启动开关。
 
     开启后,audio / image 分组下的工具页(demucs / whisper / rvc / gptsovits /
@@ -655,32 +666,22 @@ class LazyStartupCard(ElevatedCardWidget):
     """
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 16, 22, 16)
-        root.setSpacing(10)
+        super().__init__(FIF.SPEED_HIGH, "启动行为",
+                         "懒启动:开启后,音频 / 图像分组下工具启动时会快很多，但首次点开某工具时会有短暂卡顿",
+                         parent)
 
-        head = QHBoxLayout()
-        head.setSpacing(8)
-        head.addWidget(IconWidget(FIF.SPEED_HIGH, self))
-        head.addWidget(StrongBodyLabel("启动行为", self))
-        head.addStretch()
-        root.addLayout(head)
+        # 调整内部布局
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
 
-        root.addWidget(CaptionLabel(
-            "懒启动:开启后,音频 / 图像分组下的八个工具页在启动时只挂占位,"
-            "首次点开会显示「正在加载…」并构造真页。"
-            "适合只用一两个工具的用户。修改后需重启程序生效。", self
-        ))
-
-        row = QHBoxLayout()
-        row.setSpacing(10)
-        row.addWidget(BodyLabel("懒启动", self), 1)
         self.toggle = SwitchButton(self)
+        self.toggle.setOnText("开")
+        self.toggle.setOffText("关")
         self.toggle.setChecked(bool(get_field("app.lazy_startup", False)))
         self.toggle.checkedChanged.connect(self._on_toggled)
-        row.addWidget(self.toggle)
-        root.addLayout(row)
+
+        self.addGroup(FIF.POWER_BUTTON, "懒启动",
+                     "延迟加载音频/图像工具页，大幅提升启动速度", self.toggle)
 
     def _on_toggled(self, checked: bool):
         set_field("app.lazy_startup", bool(checked))
@@ -691,6 +692,214 @@ class LazyStartupCard(ElevatedCardWidget):
             parent=self.window(),
             duration=2500,
         )
+
+
+
+class PackageManagerCard(ExpandGroupSettingCard):
+    """包管理与依赖诊断卡片"""
+
+    def __init__(self, on_open, parent=None):
+        super().__init__(FIF.APPLICATION, "包管理与依赖诊断",
+                         "查看 venv 里安装的全部包并逐个卸载、对各工具执行安装/卸载,"
+                         "以及诊断多个工具共用同一环境时的锁版依赖冲突。",
+                         parent)
+
+        # 调整内部布局
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
+
+        self.open_btn = PrimaryPushButton("打开包管理器", self, FIF.RIGHT_ARROW)
+        self.open_btn.clicked.connect(on_open)
+
+        self.addGroup(FIF.COMMAND_PROMPT, "包管理器",
+                     "查看 / 卸载已安装包，诊断依赖冲突", self.open_btn)
+
+
+class ApiServerCard(ExpandGroupSettingCard):
+    """HTTP API 服务卡片 —— 把 8 个工具开放成 FastAPI 接口。
+
+    开关写 ``configs/config.json::api_server`` 并即时启停 server.api_server.ApiServerManager。
+    强制 Bearer API Key;可监听 0.0.0.0 暴露给局域网(给红字风险提示)。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(FIF.CLOUD, "API 服务（HTTP）",
+                         "启用后会在本机起一个 HTTP 服务，把 8 个工具开放成 API（请求体参考 LLM 调用："
+                         "顶层 model 选工具、parameters 带参数、stream 流式）。强制使用 Bearer API Key。",
+                         parent)
+
+        # 调整内部布局
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
+
+        # ── 监听地址 ───────────────────────────────────────────────────
+        self.host_box = ComboBox(self)
+        self.host_box.addItems(["127.0.0.1（仅本机）", "0.0.0.0（局域网可访问）"])
+        self.host_box.currentIndexChanged.connect(self._on_host_changed)
+        self.host_box.setFixedWidth(180)
+
+        # ── 端口 ───────────────────────────────────────────────────────
+        self.port_edit = LineEdit(self)
+        self.port_edit.setPlaceholderText("8765")
+        self.port_edit.setFixedWidth(135)
+
+        # ── API Key ────────────────────────────────────────────────────
+        key_widget = QWidget(self)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(20, 12, 20, 12)
+        key_layout.setSpacing(8)
+        key_layout.addWidget(BodyLabel("API Key", self))
+        self.key_edit = PasswordLineEdit(self)
+        self.key_edit.setPlaceholderText("必填 —— 点右侧生成")
+        key_layout.addWidget(self.key_edit, 1)
+        self.gen_btn = PushButton("生成", self, FIF.SYNC)
+        self.gen_btn.setFixedWidth(90)
+        self.gen_btn.clicked.connect(self._on_generate_key)
+        key_layout.addWidget(self.gen_btn)
+
+        # ── 局域网风险提示(仅 0.0.0.0 时显示) ─────────────────────────
+        warn_widget = QWidget(self)
+        warn_layout = QHBoxLayout(warn_widget)
+        warn_layout.setContentsMargins(20, 8, 20, 8)
+        self.warn_lbl = CaptionLabel(
+            "⚠ 监听 0.0.0.0 会把工具暴露给同网段设备，请务必使用强随机 Key。", self)
+        self.warn_lbl.setStyleSheet("color:#F44336;")
+        warn_layout.addWidget(self.warn_lbl)
+        warn_widget.setVisible(False)
+        self._warn_widget = warn_widget
+
+        # ── 状态 + 开关 + 复制示例 ─────────────────────────────────────
+        ctl_widget = QWidget(self)
+        ctl_layout = QHBoxLayout(ctl_widget)
+        ctl_layout.setContentsMargins(20, 12, 20, 12)
+        ctl_layout.setSpacing(10)
+        self.status_lbl = CaptionLabel("已停止", self)
+        self.status_lbl.setStyleSheet("color:rgba(128,128,128,180);")
+        ctl_layout.addWidget(self.status_lbl, 1)
+        self.copy_btn = PushButton("复制示例请求", self,
+                                   getattr(FIF, "COPY", None) or FIF.LINK)
+        self.copy_btn.clicked.connect(self._on_copy_example)
+        ctl_layout.addWidget(self.copy_btn)
+        self.toggle = SwitchButton(self)
+        self.toggle.checkedChanged.connect(self._on_toggled)
+        ctl_layout.addWidget(self.toggle)
+
+        # 添加各组到手风琴卡中
+        self.addGroup(FIF.GLOBE, "监听地址", "本机或局域网可访问", self.host_box)
+        self.addGroup(FIF.CONNECT, "端口", "HTTP 服务监听端口", self.port_edit)
+        self.addGroupWidget(key_widget)
+        self.addGroupWidget(warn_widget)
+        self.addGroupWidget(ctl_widget)
+
+        self._load_from_config()
+
+    # ── 配置加载 / 状态 ──────────────────────────────────────────────────
+    def _host_value(self) -> str:
+        return "0.0.0.0" if self.host_box.currentIndex() == 1 else "127.0.0.1"
+
+    def _port_value(self) -> int:
+        try:
+            return int((self.port_edit.text() or "8765").strip())
+        except ValueError:
+            return 8765
+
+    def _load_from_config(self):
+        host = (get_field("api_server.host", "127.0.0.1") or "127.0.0.1").strip()
+        port = get_field("api_server.port", 8765) or 8765
+        key = (get_field("api_server.api_key", "") or "").strip()
+        self.host_box.setCurrentIndex(1 if host == "0.0.0.0" else 0)
+        self.warn_lbl.setVisible(host == "0.0.0.0")
+        self.port_edit.setText(str(port))
+        self.key_edit.setText(key)
+        # 与实际运行态对齐(可能是 app.py 自启动起来的)
+        try:
+            from server.api_server import ApiServerManager
+            running = ApiServerManager.instance().is_running()
+        except Exception:
+            running = False
+        self.toggle.blockSignals(True)
+        self.toggle.setChecked(running)
+        self.toggle.blockSignals(False)
+        self._refresh_status(running)
+
+    def _refresh_status(self, running: bool):
+        if running:
+            try:
+                from server.api_server import ApiServerManager
+                base = ApiServerManager.instance().base_url
+            except Exception:
+                base = ""
+            host = self._host_value()
+            shown = base if host != "0.0.0.0" else f"http://0.0.0.0:{self._port_value()}"
+            self.status_lbl.setText(f"运行中 · {shown}")
+            self.status_lbl.setStyleSheet("color:#4CAF50;")
+        else:
+            self.status_lbl.setText("已停止")
+            self.status_lbl.setStyleSheet("color:rgba(128,128,128,180);")
+
+    # ── 交互 ─────────────────────────────────────────────────────────────
+    def _on_host_changed(self, _idx: int):
+        self._warn_widget.setVisible(self._host_value() == "0.0.0.0")
+
+    def _on_generate_key(self):
+        import secrets
+        self.key_edit.setText(secrets.token_hex(24))
+
+    def _on_copy_example(self):
+        from PyQt6.QtWidgets import QApplication
+        host = "127.0.0.1" if self._host_value() == "0.0.0.0" else self._host_value()
+        key = (self.key_edit.text() or "<API_KEY>").strip()
+        example = (
+            f'curl -X POST http://{host}:{self._port_value()}/v1/invoke '
+            f'-H "Authorization: Bearer {key}" '
+            f'-H "Content-Type: application/json" '
+            f'-d \'{{"model":"whisper","input":"C:/a.wav",'
+            f'"parameters":{{"model":"small","device":"cpu"}}}}\''
+        )
+        QApplication.clipboard().setText(example)
+        InfoBar.success("已复制", "示例 curl 已复制到剪贴板",
+                        parent=self.window(), duration=2500)
+
+    def _on_toggled(self, checked: bool):
+        from utils.configer import set_field
+        if checked:
+            key = (self.key_edit.text() or "").strip()
+            if not key:
+                InfoBar.warning("无法启动", "请先生成或填写 API Key",
+                                parent=self.window(), duration=3000)
+                self.toggle.blockSignals(True)
+                self.toggle.setChecked(False)
+                self.toggle.blockSignals(False)
+                return
+            host, port = self._host_value(), self._port_value()
+            # 落盘(server 启动时也会读 api_server.api_key 做鉴权)
+            set_field("api_server.host", host)
+            set_field("api_server.port", port)
+            set_field("api_server.api_key", key)
+            try:
+                from server.api_server import ApiServerManager
+                ApiServerManager.instance().start(host, port)
+            except Exception as e:
+                error(f"[settings] API 服务启动失败: {e}")
+                InfoBar.error("启动失败", str(e)[:200],
+                              parent=self.window(), duration=-1)
+                self.toggle.blockSignals(True)
+                self.toggle.setChecked(False)
+                self.toggle.blockSignals(False)
+                self._refresh_status(False)
+                return
+            set_field("api_server.enabled", True)
+            self._refresh_status(True)
+            InfoBar.success("已启动", f"API 服务运行在 {self._host_value()}:{port}",
+                            parent=self.window(), duration=3000)
+        else:
+            try:
+                from server.api_server import ApiServerManager
+                ApiServerManager.instance().stop()
+            except Exception as e:
+                warning(f"[settings] API 服务停止异常: {e}")
+            set_field("api_server.enabled", False)
+            self._refresh_status(False)
 
 
 class SettingsWidget(QWidget):
@@ -720,6 +929,12 @@ class SettingsWidget(QWidget):
         layout.setSpacing(12)
         layout.setContentsMargins(30, 30, 30, 30)
 
+        self.pkg_card = PackageManagerCard(self._open_package_manager, content)
+        layout.addWidget(self.pkg_card)
+
+        self.api_card = ApiServerCard(content)
+        layout.addWidget(self.api_card)
+
         self.lazy_card = LazyStartupCard(content)
         layout.addWidget(self.lazy_card)
 
@@ -735,4 +950,27 @@ class SettingsWidget(QWidget):
         layout.addStretch()
 
         scroll.setWidget(content)
-        outer.addWidget(scroll)
+
+        # 把卡片标题/内容标签的字体统一成 app.py 设置的全局字体
+        # (qfluentwidgets 默认给它们写死了 Segoe UI)
+        apply_app_font(content)
+
+        # 内层 QStackedWidget:index 0 = 设置主页(上面的滚动区),
+        # index 1 = 包管理二级页(懒构造,首次点「打开包管理器」才建)。
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(scroll)
+        self._pkg_page = None
+        outer.addWidget(self._stack)
+
+    def _open_package_manager(self):
+        """切到包管理二级页;首次打开时才构造它(连带拉起 pip_worker 等)。"""
+        if self._pkg_page is None:
+            # 懒导入避免与 subpage_package_manager 的循环引用
+            # (它 import 本模块的 LogTextEdit)
+            from widgets.subpage.subpage_package_manager import PackageManagerWidget
+            self._pkg_page = PackageManagerWidget(
+                on_back=lambda: self._stack.setCurrentIndex(0), parent=self)
+            self._stack.addWidget(self._pkg_page)
+            apply_app_font(self._pkg_page)
+        self._stack.setCurrentWidget(self._pkg_page)
+        self._pkg_page.refresh()

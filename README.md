@@ -19,7 +19,7 @@
 - 基于 [QFluentWidgets](https://qfluentwidgets.com/) 的 Fluent 风格界面 深色 / 浅色主题一键切换
 - 自动依赖安装：pip 源 + 阿里云 PyTorch wheel 直链 + dulwich Git 克隆 + 镜像探测排序
 - 节点编辑器：ComfyUI 风格的可视化连线工作流 快捷键类Blender
-
+- 开放FastApi供其他主机调用 (研发中暂不可用)
 ---
 
 ## 已支持工具

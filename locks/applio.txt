@@ -5,7 +5,7 @@
 # 这里 lock 的版本是 py311 当前 freeze 实际状态——注意有几处和上游
 # requirements.txt 不一致(被后续 GPT-SoVITS 等工具的依赖解析调整过):
 #   - librosa: 上游钉 0.11.0,实际是 0.10.2 (GPT-SoVITS 钉 0.10.2)
-#   - gradio:  上游钉 6.5.1,  实际是 4.44.1 (GPT-SoVITS 钉 gradio<5)
+#   - gradio:  上游钉 6.5.1,  实际是 4.21.0 (GPT-SoVITS 钉 gradio<5)
 #   - numpy:   上游钉 2.3.5,  本 lock 改成 1.26.4 —— 见下方注释
 #   - requests: 上游约束 >=2.31,<2.32, 实际是 2.34.2
 # 整合包要还原"装完所有工具后的 py311 状态"就以本文件为准;
@@ -19,7 +19,7 @@ setuptools==81.0.0
 # 这一行必须与 whisper.txt / audiocraft.txt / gptsovits.txt 同步。
 numpy==1.26.4
 requests==2.34.2
-tqdm==4.68.3
+tqdm==4.68.2
 wget==3.2
 
 ffmpeg-python==0.2.0
@@ -40,7 +40,7 @@ transformers==4.44.2
 
 matplotlib==3.10.8
 tensorboard==2.20.0
-gradio==4.44.1
+gradio==4.21.0
 
 tensorboardX==2.6.5
 edge-tts==7.2.7

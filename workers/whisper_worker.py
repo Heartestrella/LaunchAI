@@ -42,6 +42,64 @@ class WhisperWorker(QThread):
             return [input_param]
         return []
 
+    # ── Qt-free 调用核(GUI 的 run() 与 HTTP API 共用) ──────────────────
+    @staticmethod
+    def file_list(params: dict) -> list:
+        """把 input(str | list[str])归一成路径列表。"""
+        ip = params.get('input')
+        if isinstance(ip, list):
+            return ip
+        if isinstance(ip, str):
+            return [ip]
+        return []
+
+    @staticmethod
+    def build_argv(params: dict, input_path: str) -> list:
+        """构建单个文件的 whisper CLI 命令。GUI / API 共用,无 Qt 依赖。"""
+        output_dir = params.get('output') or _paths.output_dir("whisper")
+        whisper_model_dir = _paths.model_dir("whisper")
+        model = params.get('model', 'small')
+        device = params.get('device', 'cpu')
+        language = params.get('language', None)
+        task = params.get('task', 'transcribe')
+        output_format = params.get('output_format', 'all')
+        beam_size = params.get('beam_size', 5)
+        best_of = params.get('best_of', 1)
+        temperature = params.get('temperature', 0.0)
+        word_timestamps = params.get('word_timestamps', False)
+        condition_on_previous_text = params.get('condition_on_previous_text', True)
+
+        cmd = [sys.executable, "-m", "whisper", input_path,
+               "--model", model, "--device", device,
+               "--output_dir", output_dir,
+               "--model_dir", whisper_model_dir,
+               "--output_format", "all" if output_format == 'all' else output_format]
+
+        if language and language != "auto":
+            cmd.extend(["--language", language])
+        if task == "translate":
+            cmd.extend(["--task", "translate"])
+        if beam_size != 5:
+            cmd.extend(["--beam_size", str(beam_size)])
+        if best_of != 1:
+            cmd.extend(["--best_of", str(best_of)])
+        if temperature != 0.0:
+            cmd.extend(["--temperature", str(temperature)])
+        if word_timestamps:
+            cmd.append("--word_timestamps")
+        if not condition_on_previous_text:
+            cmd.append("--no_condition_on_previous_text")
+        return cmd
+
+    @staticmethod
+    def parse_percent(line: str):
+        if '%' in line or ('[' in line and ']' in line and '/' in line):
+            import re
+            m = re.search(r'(\d+)%', line)
+            if m:
+                return int(m.group(1))
+        return None
+
     def run(self):
         try:
             file_list = self._get_file_list()
@@ -58,15 +116,7 @@ class WhisperWorker(QThread):
             whisper_model_dir = _paths.model_dir("whisper")
             model = self.params.get('model', 'small')
             device = self.params.get('device', 'cpu')
-            language = self.params.get('language', None)
             task = self.params.get('task', 'transcribe')
-            output_format = self.params.get('output_format', 'all')
-            beam_size = self.params.get('beam_size', 5)
-            best_of = self.params.get('best_of', 1)
-            temperature = self.params.get('temperature', 0.0)
-            word_timestamps = self.params.get('word_timestamps', False)
-            condition_on_previous_text = self.params.get(
-                'condition_on_previous_text', True)
 
             os.makedirs(output_dir, exist_ok=True)
 
@@ -87,39 +137,7 @@ class WhisperWorker(QThread):
                 self.progress.emit(
                     progress_pct, f"正在处理 ({idx+1}/{total_files}): {file_name}")
 
-                cmd = [sys.executable, "-m", "whisper", input_path,
-                       "--model", model, "--device", device,
-                       "--output_dir", output_dir,
-                       "--model_dir", whisper_model_dir]
-
-                # whisper CLI 的 --output_format 是 store 而非 append，
-                # 多次传只会保留最后一个；想要同时产出 txt/srt/vtt/json
-                # 必须借助内置的 "all" 关键字。
-                if output_format == 'all':
-                    cmd.extend(["--output_format", "all"])
-                else:
-                    cmd.extend(["--output_format", output_format])
-
-                if language and language != "auto":
-                    cmd.extend(["--language", language])
-
-                if task == "translate":
-                    cmd.extend(["--task", "translate"])
-
-                if beam_size != 5:
-                    cmd.extend(["--beam_size", str(beam_size)])
-
-                if best_of != 1:
-                    cmd.extend(["--best_of", str(best_of)])
-
-                if temperature != 0.0:
-                    cmd.extend(["--temperature", str(temperature)])
-
-                if word_timestamps:
-                    cmd.append("--word_timestamps")
-
-                if not condition_on_previous_text:
-                    cmd.append("--no_condition_on_previous_text")
+                cmd = self.build_argv(self.params, input_path)
 
                 self.output.emit(self._html(
                     f"执行命令: {' '.join(cmd)}", "#888888"))

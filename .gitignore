@@ -15,3 +15,4 @@ htdemucs/
 transcripts/
 runs/
 data/
+config.json

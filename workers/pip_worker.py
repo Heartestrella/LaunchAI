@@ -39,6 +39,22 @@ LOCK_MAP = {
     "GPT-SoVITS": "gptsovits.txt",
     "audiocraft": "audiocraft.txt",
 }
+# 「LaunchAI 工具」识别包 → SwitchPage page_name 反查表。
+# 卸载时:1) set_field("installed.<pkg>", False) 让下次启动检测到未安装;
+#        2) PackageManagerPage 据此找到对应的 SwitchPage 调 switch_page(0)
+#           直接把当前工具页翻回「未安装」状态,无需重启。
+# key = pip 实际包名(即 PipWorker.is_package_installed 用的字符串),
+# value = app.py 里 Window 实例上的属性名(去掉 "interface" 后缀的小写)。
+TOOL_PACKAGE_TO_PAGE = {
+    "demucs":         "demucs",
+    "openai-whisper": "whisper",
+    "ultralytics":    "yolo",
+    "Applio":         "rvc",
+    "GPT-SoVITS":     "gptsovits",
+    "audiocraft":     "audiocraft",
+    "Real-ESRGAN":    "ESRGAN",
+    "iopaint":        "iopaint",
+}
 MIRROR_URLS = get_field("git_mirror_hosts", [])
 info(f"获取到GIT加速镜像: {MIRROR_URLS}")
 
@@ -1410,6 +1426,89 @@ else:
             return False
 
     @staticmethod
+    def list_installed_packages() -> list:
+        """pip list --format=json,返回 [{name, version}, ...]。
+
+        Returns:
+            失败/超时 → 空列表。调用方需要处理空列表(展示"无法获取包列表")。
+        """
+        import json
+        try:
+            result = subprocess.run(
+                [PYTHON_PATH, "-m", "pip", "list", "--format=json", "--disable-pip-version-check"],
+                capture_output=True, text=True, timeout=20,
+                encoding='utf-8', errors='replace',
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                error(f"pip list 失败 rc={result.returncode} stderr={result.stderr[:200]}")
+                return []
+            data = json.loads(result.stdout)
+            # 标准化为 [{name, version}],pip 自己返回 [{"name":..., "version":...}]
+            return [{"name": d.get("name", ""), "version": d.get("version", "")}
+                    for d in data if isinstance(d, dict) and d.get("name")]
+        except Exception as e:
+            error(f"list_installed_packages 异常: {e}")
+            return []
+
+    @staticmethod
+    def list_dependency_edges() -> dict:
+        """构建已安装包之间的依赖边,供「树状图」展示递进关系。
+
+        返回 {规范化包名: [它依赖且确实已安装的规范化包名, ...]}。
+        - 只保留运行期依赖:extras 触发的、marker 不满足的(如仅 Windows / 仅 py<3.8)依赖跳过;
+        - 只保留本环境真正装了的边,避免把没装的可选依赖画进树里。
+        PYTHON_PATH == sys.executable,所以直接读本进程的 importlib.metadata 即可,无需起子进程。
+        """
+        import importlib.metadata as im
+        try:
+            from packaging.requirements import Requirement
+        except Exception as e:
+            error(f"list_dependency_edges 缺少 packaging: {e}")
+            return {}
+
+        def _norm(n: str) -> str:
+            return (n or "").lower().replace("_", "-").strip()
+
+        installed = set()
+        raw_requires = {}   # norm_name -> [Requirement 字符串]
+        try:
+            for dist in im.distributions():
+                name = _norm(dist.metadata.get("Name", ""))
+                if not name:
+                    continue
+                installed.add(name)
+                # 同名包可能因多份 .dist-info 出现多次,合并 requires 即可
+                raw_requires.setdefault(name, [])
+                raw_requires[name].extend(dist.requires or [])
+        except Exception as e:
+            error(f"list_dependency_edges 枚举失败: {e}")
+            return {}
+
+        edges = {}
+        for name, reqs in raw_requires.items():
+            deps = []
+            seen = set()
+            for spec in reqs:
+                try:
+                    r = Requirement(spec)
+                except Exception:
+                    continue
+                # extras 触发的依赖(marker 含 extra == "...")默认不装,跳过
+                if r.marker is not None:
+                    try:
+                        if not r.marker.evaluate():
+                            continue
+                    except Exception:
+                        # marker 含 extra 等无法在空环境求值 → 视为可选,跳过
+                        continue
+                dep = _norm(r.name)
+                if dep in installed and dep != name and dep not in seen:
+                    seen.add(dep)
+                    deps.append(dep)
+            edges[name] = deps
+        return edges
+
+    @staticmethod
     def get_torch_devices():
         """获取所有可用的 torch 设备
 
@@ -1453,6 +1552,129 @@ print(devices)
         self.requestInterruption()
         self.quit()
         self.wait()
+
+
+class UninstallWorker(QThread):
+    """卸载工作线程: 跑 `pip uninstall -y <pkg>` 并流式回吐输出。
+
+    与 PipWorker 共用信号形状(output_signal/finished_signal),
+    PackageManagerPage 直接复用 LogTextEdit。
+
+    完成后:
+      - 成功 → set_field("installed.<pkg>", False),让仓库式工具
+        (Applio / GPT-SoVITS)的 SwitchPage 重启后也认为未安装。
+      - 失败 → 不动 config,避免 UI 显示「未安装」但环境里残留半成品。
+    """
+    output_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, packages, purge_dirs=None, parent=None):
+        super().__init__(parent)
+        self.packages = packages if isinstance(packages, list) else [packages]
+        # purge_dirs: pip uninstall 之后要额外 rmtree 的目录(克隆的源码工程,
+        # 如 _git_projects/<package>_<fork>)。pip 卸载只清 site-packages,
+        # setup.py develop / 克隆下来的仓库目录不会被清,需要这里补刀。
+        self.purge_dirs = list(purge_dirs) if purge_dirs else []
+        self._proc = None
+        self._cancelled = False
+
+    def _html(self, text, color=None, bold=False):
+        if not color and not bold:
+            return text
+        style = []
+        if color:
+            style.append(f"color:{color}")
+        if bold:
+            style.append("font-weight:bold")
+        return f'<span style="{";".join(style)}">{text}</span>'
+
+    def cancel(self):
+        self._cancelled = True
+        try:
+            if self._proc and self._proc.poll() is None:
+                self._proc.kill()
+        except Exception:
+            pass
+
+    def run(self):
+        if not self.packages and not self.purge_dirs:
+            self.finished_signal.emit(False, "未指定要卸载的包")
+            return
+
+        ok_pkgs, fail_pkgs = [], []
+        for pkg in self.packages:
+            if self._cancelled:
+                break
+            self.output_signal.emit(self._html(
+                f"▶ 卸载 {pkg} …", "#4FC3F7", bold=True))
+            cmd = [PYTHON_PATH, "-m", "pip", "uninstall", "-y",
+                   "--disable-pip-version-check", pkg]
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+                for line in iter(self._proc.stdout.readline, ""):
+                    if not line:
+                        break
+                    self.output_signal.emit(line.rstrip())
+                rc = self._proc.wait()
+            except Exception as e:
+                self.output_signal.emit(self._html(
+                    f"✗ {pkg} 卸载异常: {e}", "#F44336"))
+                fail_pkgs.append(pkg)
+                continue
+
+            if rc == 0:
+                ok_pkgs.append(pkg)
+                set_field(f"installed.{pkg}", False)
+                self.output_signal.emit(self._html(
+                    f"✅ {pkg} 已卸载", "#4CAF50"))
+            else:
+                fail_pkgs.append(pkg)
+                self.output_signal.emit(self._html(
+                    f"✗ {pkg} 卸载失败 (rc={rc})", "#F44336"))
+
+        # 清理克隆的源码工程目录(pip uninstall 不会动这些)。
+        # 即便某些包 pip 卸载失败,这里仍尝试删目录:用户选的是「彻底删除」,
+        # 残留的半成品克隆只会让下次重装更乱。ignore_errors 容忍占用/缺失。
+        for d in self.purge_dirs:
+            if self._cancelled:
+                break
+            if not d or not os.path.isdir(d):
+                continue
+            self.output_signal.emit(self._html(
+                f"🗑 删除目录 {d} …", "#FF9800"))
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+                if os.path.isdir(d):
+                    self.output_signal.emit(self._html(
+                        f"⚠ 目录未能完全删除(可能被占用): {d}", "#FF9800"))
+                else:
+                    self.output_signal.emit(self._html(
+                        f"✅ 已删除 {d}", "#4CAF50"))
+            except Exception as e:
+                self.output_signal.emit(self._html(
+                    f"✗ 删除目录失败 {d}: {e}", "#F44336"))
+
+        if self._cancelled:
+            self.finished_signal.emit(False, "已取消卸载")
+            return
+        if fail_pkgs:
+            self.finished_signal.emit(
+                False,
+                f"成功 {len(ok_pkgs)} 个,失败 {len(fail_pkgs)} 个: {', '.join(fail_pkgs)}")
+        elif ok_pkgs:
+            self.finished_signal.emit(
+                True, f"已卸载 {len(ok_pkgs)} 个包: {', '.join(ok_pkgs)}")
+        else:
+            # 纯目录清理(packages 为空,如 Real-ESRGAN 内置工具只删源码残留)
+            self.finished_signal.emit(True, "已清理源码残留")
 
 
 PipWorker._test_git_mirrors()

@@ -96,6 +96,69 @@ class RealESRGANWorker(QThread):
         except Exception as e:
             self.error.emit(f"推理过程中发生异常: {e}")
 
+    # ── Qt-free 调用核(GUI 的 _run_inference 与 HTTP API 共用) ──────────
+    @staticmethod
+    def build_argv(params: dict):
+        """根据参数构建 ncnn-vulkan 命令行。
+
+        返回 (cmd:list[str], out_path:str)。不做存在性校验、不依赖 Qt;
+        GUI 的 _run_inference 与 HTTP API runner 共用这份 argv 逻辑。
+        out_path:输入是文件→<output_dir>/<stem>_x<scale>.<fmt>;输入是目录→output_dir。
+        """
+        p = params
+        exe_path = p.get("exe_path", DEFAULT_EXE)
+        input_path = p.get("input", "")
+        output_dir = p.get("output_dir") or _paths.output_dir("realesrgan")
+        model_name = p.get("model", "realesrgan-x4plus")
+        scale = int(p.get("scale", 4))
+        tile = int(p.get("tile", 0))
+        gpu_id = str(p.get("gpu_id", "auto"))
+        tta = bool(p.get("tta", False))
+        fmt = p.get("fmt", "png").lower()
+        threads = p.get("threads", "1:2:2")
+        model_dir = p.get("model_dir", "")
+
+        if not model_dir:
+            model_dir = os.path.join(os.path.dirname(exe_path), "models")
+        if not os.path.isabs(model_dir):
+            model_dir = os.path.join(os.path.dirname(exe_path), model_dir)
+
+        os.makedirs(output_dir, exist_ok=True)
+        if os.path.isfile(input_path):
+            stem = Path(input_path).stem
+            out_path = os.path.join(output_dir, f"{stem}_x{scale}.{fmt}")
+        else:
+            out_path = output_dir
+
+        # ncnn-vulkan 把 -m 当作相对 exe 目录的路径,绝对路径会被双前缀,转相对
+        try:
+            model_dir_arg = os.path.relpath(model_dir, os.path.dirname(exe_path))
+        except ValueError:
+            model_dir_arg = model_dir
+
+        cmd = [exe_path,
+               "-i", input_path,
+               "-o", out_path,
+               "-s", str(scale),
+               "-t", str(tile),
+               "-n", model_name,
+               "-m", model_dir_arg,
+               "-j", threads]
+        if gpu_id not in ("auto", "-1", ""):
+            cmd.extend(["-g", gpu_id])
+        if tta:
+            cmd.append("-x")
+        if fmt in ("jpg", "webp"):
+            cmd.extend(["-f", fmt])
+        return cmd, out_path
+
+    @staticmethod
+    def parse_percent(line: str):
+        m = re.search(r'(\d+(?:\.\d+)?)\s*%', line)
+        if m:
+            return min(99, int(float(m.group(1))))
+        return None
+
     def _run_inference(self):
         p = self.params
 
@@ -105,11 +168,6 @@ class RealESRGANWorker(QThread):
         output_dir = p.get("output_dir") or _paths.output_dir("realesrgan")
         model_name = p.get("model",      "realesrgan-x4plus")
         scale = int(p.get("scale",  4))
-        tile = int(p.get("tile",   0))
-        gpu_id = str(p.get("gpu_id", "auto"))
-        tta = bool(p.get("tta",   False))
-        fmt = p.get("fmt",        "png").lower()
-        threads = p.get("threads",    "1:2:2")
         model_dir = p.get("model_dir",  "")
 
         # ── 基础校验 ──────────────────────────────────────────────────
@@ -128,11 +186,9 @@ class RealESRGANWorker(QThread):
             )
             return
 
-        # ── 确定模型目录 ──────────────────────────────────────────────
+        # ── 确定模型目录(仅用于校验与日志;argv 在 build_argv 内自行解析) ──
         if not model_dir:
             model_dir = os.path.join(os.path.dirname(exe_path), "models")
-
-        # 如果 model_dir 是相对路径，解析为以 exe 所在目录为基准的绝对路径
         if not os.path.isabs(model_dir):
             model_dir = os.path.join(os.path.dirname(exe_path), model_dir)
 
@@ -140,50 +196,8 @@ class RealESRGANWorker(QThread):
             self.error.emit(f"模型目录不存在: {model_dir}")
             return
 
-        # ── 构建输出路径 ──────────────────────────────────────────────
-        # 输入是文件 → 输出是同名文件（放到 output_dir）
-        # 输入是目录 → 输出是目录
-        os.makedirs(output_dir, exist_ok=True)
-
-        if os.path.isfile(input_path):
-            stem = Path(input_path).stem
-            out_path = os.path.join(output_dir, f"{stem}_x{scale}.{fmt}")
-        else:
-            out_path = output_dir
-
-        # ── 构建命令行 ────────────────────────────────────────────────
-        # realesrgan-ncnn-vulkan 会把 -m 当作相对 exe 目录的路径，
-        # 内部用 "<exe_dir>\\<m_arg>\\<model>.param" 拼接。传绝对路径会得到
-        # "<exe_dir>\\C:\\...\\models\\xxx.param" 这种双前缀失败路径。
-        # 这里把 model_dir 转成相对 exe 目录的路径再传。
-        try:
-            model_dir_arg = os.path.relpath(model_dir, os.path.dirname(exe_path))
-        except ValueError:
-            # 跨盘符无法 relpath —— 退回绝对路径，让 exe 自己抱怨
-            model_dir_arg = model_dir
-
-        cmd = [exe_path,
-               "-i", input_path,
-               "-o", out_path,
-               "-s", str(scale),
-               "-t", str(tile),
-               "-n", model_name,
-               "-m", model_dir_arg,
-               "-j", threads]
-
-        # gpu_id 说明:
-        #   "auto" → 不传 -g，ncnn-vulkan 自动选第一块 GPU
-        #   "-1"   → CPU 模式，ncnn-vulkan 不接受 -g -1，也不传 -g
-        #   "0"/"1" → 指定 GPU 编号
-        if gpu_id not in ("auto", "-1", ""):
-            cmd.extend(["-g", gpu_id])
-
-        if tta:
-            cmd.append("-x")
-
-        # 部分版本支持 -f 指定输出格式
-        if fmt in ("jpg", "webp"):
-            cmd.extend(["-f", fmt])
+        # ── 构建命令行 + 输出路径(与 API 共用 build_argv) ───────────────
+        cmd, out_path = self.build_argv(self.params)
 
         # ── 日志：打印完整命令 ────────────────────────────────────────
         # 调试信息：打印解析后的模型名与模型目录

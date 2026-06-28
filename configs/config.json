@@ -1,1 +1,24 @@
-{}
+{
+  "paths": {
+    "root": "c:\\Users\\Administrator\\Desktop\\LaunchAI\\data"
+  },
+  "iopaint": {
+    "model": "lama"
+  },
+  "materials": {
+    "disclaimer_accepted": true
+  },
+  "app": {
+    "lazy_startup": true
+  },
+  "api_server": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "api_key": "00d34ddc02c14574048b2030229bd05b683726bdfae4f4a0",
+    "autostart": false
+  },
+  "installed": {
+    "iopaint": false
+  }
+}

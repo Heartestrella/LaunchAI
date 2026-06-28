@@ -56,6 +56,29 @@ class GPTSoVITSInferWorker(QThread):
         self.process = None
         self._is_cancelled = False
 
+    # ── Qt-free 调用核(GUI 的 run() 与 HTTP API 共用) ──────────────────
+    @staticmethod
+    def build_argv(params: dict) -> list:
+        """构建 GPT-SoVITS runner 命令(指向 _gptsovits_runner.py)。GUI / API 共用。"""
+        cmd = [sys.executable, _INFER_RUNNER,
+               "--gpt-model",       params.get("gpt_model", ""),
+               "--sovits-model",    params.get("sovits_model", ""),
+               "--ref-audio",       params.get("ref_audio", ""),
+               "--ref-text",        params.get("ref_text", ""),
+               "--ref-language",    params.get("ref_language", "中文"),
+               "--target-text",     params.get("target_text", ""),
+               "--target-language", params.get("target_language", "中文"),
+               "--output",          params.get("output", ""),
+               "--how-to-cut",      params.get("how_to_cut", "不切"),
+               "--top-k",           str(int(params.get("top_k", 15))),
+               "--top-p",           str(float(params.get("top_p", 1.0))),
+               "--temperature",     str(float(params.get("temperature", 1.0))),
+               "--speed",           str(float(params.get("speed", 1.0))),
+               "--device",          params.get("device", "cuda:0")]
+        for aux in list(params.get("aux_ref_audios", []) or []):
+            cmd += ["--aux-ref-audio", aux]
+        return cmd
+
     def run(self):
         try:
             gpt_model = self.params.get("gpt_model", "")
@@ -86,23 +109,7 @@ class GPTSoVITSInferWorker(QThread):
                 self.error.emit("未指定输出路径")
                 return
 
-            cmd = [sys.executable, _INFER_RUNNER,
-                   "--gpt-model",       gpt_model,
-                   "--sovits-model",    sovits_model,
-                   "--ref-audio",       ref_audio,
-                   "--ref-text",        ref_text,
-                   "--ref-language",    self.params.get("ref_language", "中文"),
-                   "--target-text",     target_text,
-                   "--target-language", self.params.get("target_language", "中文"),
-                   "--output",          output_path,
-                   "--how-to-cut",      self.params.get("how_to_cut", "不切"),
-                   "--top-k",           str(int(self.params.get("top_k", 15))),
-                   "--top-p",           str(float(self.params.get("top_p", 1.0))),
-                   "--temperature",     str(float(self.params.get("temperature", 1.0))),
-                   "--speed",           str(float(self.params.get("speed", 1.0))),
-                   "--device",          self.params.get("device", "cuda:0")]
-            for aux in aux_ref_audios:
-                cmd += ["--aux-ref-audio", aux]
+            cmd = self.build_argv(self.params)
 
             self.progress.emit(0, "准备启动 GPT-SoVITS...")
             self.output.emit(_html(
