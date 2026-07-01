@@ -1000,10 +1000,29 @@ else:
                     f"✅ 已把 {', '.join(patched)} 里的 av==11.0.0 放宽到 av>=11.0.0",
                     "#4CAF50"))
 
-            # Step 2-4: 装依赖。优先走 locks/audiocraft.txt(已干净,不含 torch/
+            # Step 2: 无论走不走 lock,都先把 requirements.txt 里的 torch* 和
+            # (pesq / torchtext / xformers) 剥掉。这几个必须剥:
+            #   torchtext: 钉 torch>=2.1.0,<2.2.0; 仓库 grep 0 命中纯死代码
+            #   xformers<0.0.23: 钉 torch==2.0.1; Step 6 用 --no-deps 单装新版
+            #   pesq: 无 win wheel,源码构建要 cypesq.c 但 sdist 布局在 win 上
+            #         经常拿不到该文件导致 C1083;LaunchAI 只跑 MusicGen / AudioGen
+            #         推理,pesq 仅出现在训练用的 watermark solver,代码路径走不到
+            # 之前只有 no-lock 分支做这个剥离,导致 lock 分支下 Step 5 的
+            # `pip install <project_root>` 读到未清理的 requirements.txt,
+            # setup.py 触发 pip 装 pesq → Windows 上编译失败,整包安装挂掉。
+            if os.path.exists(req_file):
+                self._filter_torch_requirements(req_file)
+                removed = self._strip_requirements(
+                    req_file, ("pesq", "torchtext", "xformers"))
+                if removed:
+                    self.output_signal.emit(self._html(
+                        f"已从 requirements 移除: {', '.join(removed)} "
+                        "(torchtext/xformers 会把 CUDA torch 拖成 CPU;pesq 无 win wheel)",
+                        "#4FC3F7"))
+
+            # Step 3-4: 装依赖。优先走 locks/audiocraft.txt(已干净,不含 torch/
             # pesq/torchtext/xformers,av 也是已知能装 wheel 的版本);
-            # 没锁文件时回退到上游 requirements,过滤 torch* + 剥 pesq/torchtext/xformers,
-            # 再单独装 av --only-binary。
+            # 没锁文件时用剥过的 requirements + 单独装 av --only-binary。
             lock = _lock_path(package)
             if lock:
                 self.output_signal.emit(self._html(
@@ -1013,21 +1032,6 @@ else:
                     self.finished_signal.emit(False, "audiocraft 依赖安装失败")
                     return None
             else:
-                # 没锁:照旧过滤上游 requirements,然后单独装 av,再装其余
-                if os.path.exists(req_file):
-                    self._filter_torch_requirements(req_file)
-                    # 这几个会把 CUDA torch 拖成 CPU 或源码构建失败,必须剥:
-                    #   torchtext: 钉 torch>=2.1.0,<2.2.0; 仓库 grep 0 命中纯死代码
-                    #   xformers<0.0.23: 钉 torch==2.0.1; Step 6 用 --no-deps 单装新版
-                    #   pesq: 无 win wheel; LaunchAI 只跑推理,代码路径走不到
-                    removed = self._strip_requirements(
-                        req_file, ("pesq", "torchtext", "xformers"))
-                    if removed:
-                        self.output_signal.emit(self._html(
-                            f"已从 requirements 移除: {', '.join(removed)} "
-                            "(torchtext/xformers 会把 CUDA torch 拖成 CPU;pesq 无 wheel)",
-                            "#4FC3F7"))
-
                 self.output_signal.emit(self._html(
                     "正在安装 av (绕过 11.0.0 缺 wheel,改装最新可用版本)...",
                     "#4FC3F7"))
@@ -1044,10 +1048,13 @@ else:
                         self.finished_signal.emit(False, "audiocraft 依赖安装失败")
                         return None
 
-            # Step 5: 装 audiocraft 本体 (此时 av 已满足,setup.py 不会再尝试装 av==11)
+            # Step 5: 装 audiocraft 本体 (此时 av 已满足,setup.py 不会再尝试装 av==11)。
+            # --no-deps: 依赖已在 Step 3-4 装完,setup.py 的 install_requires 再解一遍
+            # 只会浪费时间;更关键的是防止 pip 顺手把 pesq 或其他被剥掉的包再抓回来
+            # (哪怕 requirements.txt 已被剥,某些边缘情况下 setup.py 可能内嵌 install_requires)。
             self.output_signal.emit(self._html(
-                "正在安装 audiocraft 本体...", "#4FC3F7"))
-            ok_pkg = self._run_pip_install([project_root])
+                "正在安装 audiocraft 本体 (--no-deps)...", "#4FC3F7"))
+            ok_pkg = self._run_pip_install([project_root, "--no-deps"])
             if not ok_pkg and not self._is_cancelled:
                 self.finished_signal.emit(False, "audiocraft 本体安装失败")
                 return None

@@ -1,18 +1,19 @@
 # audiocraft (facebookresearch/audiocraft @ fork_map main)
-# pip_worker.py:902-1005 流程:
+# pip_worker.py install_from_git 流程(audiocraft 分支):
 #   1. 把 setup.py / requirements.txt / setup.cfg / pyproject.toml 里
 #      `av==11.0.0` 全部放宽成 `av>=11.0.0` (该版本已从 PyPI yank)
 #   2. _filter_torch_requirements 剥 torch*
-#   3. _strip_requirements 剥 (pesq, torchtext, xformers)
-#      - pesq:     win-py311 没 wheel,源码构建要 MSVC + Cython,推理路径走不到
+#      _strip_requirements 剥 (pesq, torchtext, xformers)  ← 无论走不走 lock 都要剥
+#      - pesq:     win-py311 没 wheel,源码构建要 MSVC + Cython 且 sdist 布局在 win
+#                  常拿不到 cypesq.c 报 C1083,LaunchAI 只跑推理走不到
 #      - torchtext: 钉死 torch>=2.1.0,<2.2.0,会把 CUDA torch 拖成 CPU
-#      - xformers: 这里剥旧版约束,步骤 6 单独装匹配 torch 版本的新 xformers
-#   4. pip install av --only-binary=:all:  (跳过 av==11 的源码构建)
-#   5. pip install -r requirements.txt  (装其余依赖)
-#   6. pip install <project_root>  (装 audiocraft 本体)
-#   7. pip install xformers==<匹配 torch 版本> --no-deps
+#      - xformers: 这里剥旧版约束,步骤 5 单独装匹配 torch 版本的新 xformers
+#   3. lock 存在 → pip install -r locks/audiocraft.txt (本文件)
+#      lock 不存在 → pip install av --only-binary=:all: + pip install -r requirements.txt
+#   4. pip install <project_root> --no-deps  (装 audiocraft 本体,依赖已就位)
+#   5. pip install xformers==<匹配 torch 版本> --no-deps
 #
-# 这里 lock 的就是步骤 4/5/7 的顶层包。
+# 这里 lock 的就是步骤 3 的顶层包(不含 pesq / torchtext / xformers / torch*)。
 
 av==17.1.0
 einops==0.8.2
