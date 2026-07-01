@@ -847,7 +847,7 @@ else:
                         with open(req_file, 'a', encoding='utf-8') as f:
                             f.write("\nsoundfile\n")
                     self._run_pip_install(["-r", req_file])
-            self._run_pip_install([project_root])
+            self._run_pip_install([project_root, "--no-deps"])
             self._emit_install_finished(package)
             return None
 

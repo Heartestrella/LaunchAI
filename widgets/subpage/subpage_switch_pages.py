@@ -5,14 +5,14 @@ from PyQt6.QtCore import Qt
 from qfluentwidgets import InfoBar, BodyLabel, IconWidget, TitleLabel, PrimaryPushButton, FluentIcon as FIF
 from workers.pip_worker import PipWorker, GIT_PROJECTS_ROOT, fork_map
 from utils.configer import get_field
-import re
-from PyQt6.QtCore import QUrl, QTimer, pyqtSignal
-from PyQt6.QtGui import QTextCursor, QDesktopServices
+from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QSplitter
 from qfluentwidgets import (
     BodyLabel, TitleLabel, PrimaryPushButton, PushButton,
-    IconWidget, FluentIcon as FIF, TextEdit
+    IconWidget, FluentIcon as FIF,
 )
+from widgets.log_text_edit import LogTextEdit
 from logger import info, warning, debug, error
 from utils.atool import resource_path
 
@@ -39,57 +39,6 @@ def _repo_tool_installed(pkg: str) -> bool:
     if not fork:
         return False
     return os.path.isdir(os.path.join(GIT_PROJECTS_ROOT, f"{pkg}_{fork}"))
-
-
-class LogTextEdit(TextEdit):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptRichText(True)
-        self.setReadOnly(True)
-
-    def append_colored(self, html_text):
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.setTextCursor(cursor)
-
-        # 检测并转换 URL 为超链接
-        html_text = self._convert_urls_to_links(html_text)
-
-        if "下载进度" in html_text:
-            # 进度消息：覆盖当前行
-            cursor.movePosition(
-                QTextCursor.MoveOperation.StartOfLine, QTextCursor.MoveMode.KeepAnchor)
-            cursor.removeSelectedText()
-            cursor.insertHtml(html_text)
-        else:
-            # 普通消息：插入 HTML 并换行
-            cursor.insertHtml(html_text + '<br>')
-
-        self.ensureCursorVisible()
-
-    def _convert_urls_to_links(self, text):
-        """将文本中的 URL 转换为可点击的超链接"""
-        # 匹配 http:// 或 https:// 开头的 URL
-        url_pattern = r'(https?://[^\s<>"\'{}|\\^`\[\]]+)'
-
-        def replace_url(match):
-            url = match.group(1)
-            # 截断过长的 URL 显示
-            display_url = url if len(
-                url) <= 80 else url[:40] + '...' + url[-30:]
-            return f'<a href="{url}" style="color:#4FC3F7; text-decoration:underline;">{display_url}</a>'
-
-        return re.sub(url_pattern, replace_url, text)
-
-    def mousePressEvent(self, event):
-        """处理超链接点击"""
-        cursor = self.cursorForPosition(event.pos())
-        if cursor.charFormat().isAnchor():
-            anchor = cursor.charFormat().anchorHref()
-            if anchor:
-                QDesktopServices.openUrl(QUrl(anchor))
-                return
-        super().mousePressEvent(event)
 
 
 class NoInstallWidget(QWidget):

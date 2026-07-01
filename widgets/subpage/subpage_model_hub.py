@@ -28,7 +28,7 @@ import os
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont, QTextCursor
+from PyQt6.QtGui import QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSizePolicy, QFrame,
@@ -38,9 +38,10 @@ from qfluentwidgets import (
     PushButton, PrimaryPushButton, LineEdit, ToolButton,
     ProgressBar, CardWidget, SmoothScrollArea, IconWidget,
     InfoBar, InfoBarPosition, IndeterminateProgressBar,
-    SegmentedWidget, CheckBox, TextEdit,
+    SegmentedWidget, CheckBox,
     FluentIcon as FIF,
 )
+from widgets.log_text_edit import LogTextEdit as _LogTextEdit
 
 from workers.model_hub_worker import (
     ModelSearchWorker, ModelListFilesWorker, ModelDownloadWorker,
@@ -93,34 +94,6 @@ def _fmt_num(n: int) -> str:
     if n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  日志控件 (复用 subpage_switch_pages 的覆盖逻辑)
-# ══════════════════════════════════════════════════════════════════════
-
-class _LogTextEdit(TextEdit):
-    """支持「下载进度」前缀单行覆盖的只读 HTML 日志区"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptRichText(True)
-        self.setReadOnly(True)
-
-    def append_html(self, html: str):
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.setTextCursor(cursor)
-        if "下载进度" in html:
-            cursor.movePosition(
-                QTextCursor.MoveOperation.StartOfLine,
-                QTextCursor.MoveMode.KeepAnchor,
-            )
-            cursor.removeSelectedText()
-            cursor.insertHtml(html)
-        else:
-            cursor.insertHtml(html + "<br>")
-        self.ensureCursorVisible()
 
 
 # ══════════════════════════════════════════════════════════════════════

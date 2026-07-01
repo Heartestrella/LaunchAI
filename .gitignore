@@ -15,4 +15,6 @@ htdemucs/
 transcripts/
 runs/
 data/
-config.json
+configs/config.json
+resource/selftest/
+log.txt

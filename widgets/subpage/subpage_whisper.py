@@ -2,10 +2,9 @@
 
 import sys
 import os
-import re
 from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl, QSize
-from PyQt6.QtGui import QDesktopServices, QTextCursor
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QFrame, QSizePolicy
 
 from qfluentwidgets import (
@@ -13,55 +12,12 @@ from qfluentwidgets import (
     PrimaryPushButton, PushButton, ToolButton,
     ComboBox, Slider, CheckBox, SpinBox,
     ProgressBar, SmoothScrollArea, CardWidget, ExpandGroupSettingCard,
-    IconWidget, InfoBar, InfoBarPosition, FluentIcon as FIF, TextEdit,
+    IconWidget, InfoBar, InfoBarPosition, FluentIcon as FIF,
 )
 
 from workers.whisper_worker import WhisperWorker
+from widgets.log_text_edit import LogTextEdit
 from utils import paths as _paths
-
-
-class LogTextEdit(TextEdit):
-    """支持彩色文本和超链接的日志控件"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptRichText(True)
-        self.setReadOnly(True)
-
-    def append_colored(self, html_text: str):
-        """添加彩色 HTML 文本到日志"""
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.setTextCursor(cursor)
-
-        # 检测并转换 URL 为超链接
-        html_text = self._convert_urls_to_links(html_text)
-
-        # 插入 HTML 并换行
-        cursor.insertHtml(html_text + '<br>')
-        self.ensureCursorVisible()
-
-    def _convert_urls_to_links(self, text: str) -> str:
-        """将文本中的 URL 转换为可点击的超链接"""
-        url_pattern = r'(https?://[^\s<>"\'{}|\\^`\[\]]+)'
-
-        def replace_url(match):
-            url = match.group(1)
-            display_url = url if len(
-                url) <= 80 else url[:40] + '...' + url[-30:]
-            return f'<a href="{url}" style="color:#4FC3F7; text-decoration:underline;">{display_url}</a>'
-
-        return re.sub(url_pattern, replace_url, text)
-
-    def mousePressEvent(self, event):
-        """处理超链接点击"""
-        cursor = self.cursorForPosition(event.pos())
-        if cursor.charFormat().isAnchor():
-            anchor = cursor.charFormat().anchorHref()
-            if anchor:
-                QDesktopServices.openUrl(QUrl(anchor))
-                return
-        super().mousePressEvent(event)
 
 
 class WhisperWidget(QWidget):

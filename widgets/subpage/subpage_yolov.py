@@ -13,9 +13,8 @@ import random
 import colorsys
 from pathlib import Path
 from typing import Optional
-from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QTextCursor, QDesktopServices
 from qfluentwidgets import TextEdit
+from widgets.log_text_edit import LogTextEdit
 from PyQt6.QtCore import (
     Qt, QPoint, QPointF, QRect, QRectF, QSize,
     QThread, QObject, pyqtSignal, QTimer
@@ -80,50 +79,6 @@ COCO_CLASSES = [
 
 IMG_SIZES = ["320", "416", "512", "640", "800", "1024", "1280"]
 OUTPUT_FORMATS = ["不保存", "图片+TXT(YOLO)", "图片+JSON(COCO)", "仅图片"]
-
-
-class LogTextEdit(TextEdit):
-    """支持彩色文本和超链接的日志控件"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptRichText(True)
-        self.setReadOnly(True)
-
-    def append_colored(self, html_text: str):
-        """添加彩色 HTML 文本到日志"""
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.setTextCursor(cursor)
-
-        # 检测并转换 URL 为超链接
-        html_text = self._convert_urls_to_links(html_text)
-
-        # 插入 HTML 并换行
-        cursor.insertHtml(html_text + '<br>')
-        self.ensureCursorVisible()
-
-    def _convert_urls_to_links(self, text: str) -> str:
-        """将文本中的 URL 转换为可点击的超链接"""
-        url_pattern = r'(https?://[^\s<>"\'{}|\\^`\[\]]+)'
-
-        def replace_url(match):
-            url = match.group(1)
-            display_url = url if len(
-                url) <= 80 else url[:40] + '...' + url[-30:]
-            return f'<a href="{url}" style="color:#4FC3F7; text-decoration:underline;">{display_url}</a>'
-
-        return re.sub(url_pattern, replace_url, text)
-
-    def mousePressEvent(self, event):
-        """处理超链接点击"""
-        cursor = self.cursorForPosition(event.pos())
-        if cursor.charFormat().isAnchor():
-            anchor = cursor.charFormat().anchorHref()
-            if anchor:
-                QDesktopServices.openUrl(QUrl(anchor))
-                return
-        super().mousePressEvent(event)
 
 
 # ══════════════════════════════════════════════════════════════════════

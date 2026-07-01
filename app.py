@@ -71,6 +71,7 @@ from widgets.subpage.subpage_switch_pages import SwitchPage, LazySwitchPage
 from widgets.subpage.subpage_materials import MaterialsWidget
 from widgets.subpage.subpage_model_hub import ModelHubWidget
 from widgets.subpage.subpage_llm_chat import LLMChatPage
+from widgets.subpage.subpage_health_page import HealthCheckPage
 from node.node_editor import NodeEditorPage
 from workers.pip_worker import PipWorker
 from utils.configer import get_field
@@ -127,6 +128,7 @@ class Window(FluentWindow):
         self.yoloInterface       = _PageCls("yolo",    CUDA_DRIVERS, self);                 mark("SwitchPage yolo")
         self.iopaintInterface    = _PageCls("iopaint", CUDA_DRIVERS, self);                 mark("SwitchPage iopaint")
         self.nodeEditorInterface = NodeEditorPage(cuda_drivers=CUDA_DRIVERS, parent=self);  mark("NodeEditorPage")
+        self.healthInterface     = HealthCheckPage(CUDA_DRIVERS, self);                      mark("HealthCheckPage")
 
         self.worker = None
         self.initNavigation();  mark("initNavigation")
@@ -149,6 +151,7 @@ class Window(FluentWindow):
             "llm_chat": self.llmChatInterface,
             "yolo": self.yoloInterface,
             "iopaint": self.iopaintInterface,
+            "health": self.healthInterface,
         }
         target = page_map.get(page_name)
         if target:
@@ -256,6 +259,12 @@ class Window(FluentWindow):
             _modelhub_icon,
             '模型市场',
         )
+
+        _health_icon = getattr(FIF, "CERTIFICATE", None) \
+            or getattr(FIF, "HEART", None) \
+            or FIF.DEVELOPER_TOOLS
+        self.addSubInterface(self.healthInterface, _health_icon,
+                             '自检 / 运行测试', NavigationItemPosition.BOTTOM)
 
         self.addSubInterface(self.settingInterface, FIF.SETTING,
                              '设置', NavigationItemPosition.BOTTOM)

@@ -1,10 +1,9 @@
 # widgets/subpage/subpage_rvc.py
 
 import os
-import re
 from pathlib import Path
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QTextCursor
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFileDialog, QSizePolicy,
     QStackedWidget,
@@ -15,49 +14,12 @@ from qfluentwidgets import (
     PrimaryPushButton, PushButton, ToolButton,
     ComboBox, Slider, SpinBox, DoubleSpinBox, CheckBox,
     ProgressBar, SmoothScrollArea, CardWidget, ExpandGroupSettingCard,
-    IconWidget, InfoBar, FluentIcon as FIF, TextEdit, Pivot,
+    IconWidget, InfoBar, FluentIcon as FIF, Pivot,
 )
 
 from workers.rvc_worker import RVCInferWorker, RVCRealtimeWorker
+from widgets.log_text_edit import LogTextEdit
 from utils import paths as _paths
-
-
-class LogTextEdit(TextEdit):
-    """支持彩色文本和超链接的日志控件"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptRichText(True)
-        self.setReadOnly(True)
-
-    def append_colored(self, html_text: str):
-        cursor = self.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        self.setTextCursor(cursor)
-
-        html_text = self._convert_urls_to_links(html_text)
-        cursor.insertHtml(html_text + '<br>')
-        self.ensureCursorVisible()
-
-    def _convert_urls_to_links(self, text: str) -> str:
-        url_pattern = r'(https?://[^\s<>"\'{}|\\^`\[\]]+)'
-
-        def replace_url(match):
-            url = match.group(1)
-            display_url = url if len(
-                url) <= 80 else url[:40] + '...' + url[-30:]
-            return f'<a href="{url}" style="color:#4FC3F7; text-decoration:underline;">{display_url}</a>'
-
-        return re.sub(url_pattern, replace_url, text)
-
-    def mousePressEvent(self, event):
-        cursor = self.cursorForPosition(event.pos())
-        if cursor.charFormat().isAnchor():
-            anchor = cursor.charFormat().anchorHref()
-            if anchor:
-                QDesktopServices.openUrl(QUrl(anchor))
-                return
-        super().mousePressEvent(event)
 
 
 def _section_title(text: str, icon=None, parent=None):

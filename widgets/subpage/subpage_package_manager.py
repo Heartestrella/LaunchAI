@@ -6,7 +6,7 @@
   3. 全部已安装包 —— pip list 全量 + 逐包卸载 + 搜索过滤
 
 卸载统一走 workers.pip_worker.UninstallWorker(信号形状与 PipWorker 一致),
-底部复用 subpage_setting_page.LogTextEdit 做流式终端。
+底部复用 widgets.log_text_edit.LogTextEdit 做流式终端。
 """
 import os
 
@@ -28,7 +28,7 @@ from workers.pip_worker import (
     PipWorker, UninstallWorker, LOCKS_ROOT, GIT_PROJECTS_ROOT, fork_map,
 )
 from utils import conflict_analyzer as ca
-from widgets.subpage.subpage_setting_page import LogTextEdit
+from widgets.log_text_edit import LogTextEdit
 
 
 # 工具元数据。kind:
