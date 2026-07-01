@@ -108,6 +108,9 @@ class HealthCheckPage(QWidget):
         self._cuda_drivers = cuda_drivers or {}
         self._worker = None
         self._probe = None
+        # 已探测到的「已安装」工具集,决定按钮启用状态。首次探测前假定全装(乐观),
+        # probe 完成后收敛到真实值,后续测试跑完 _set_running 也据此重启用。
+        self._installed: set[str] = set(TOOLS.keys())
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -178,15 +181,18 @@ class HealthCheckPage(QWidget):
         self._probe.start()
 
     def _on_probe_done(self, rows: list):
+        self._installed = {r.get("tool") for r in rows if r.get("installed")}
         for r in rows:
             tool = r.get("tool")
-            if r.get("installed"):
+            installed = bool(r.get("installed"))
+            row = self.card.rows.get(tool)
+            if installed:
                 self.card.set_status(tool, "已安装 · 待测", _GREY)
             else:
                 self.card.set_status(tool, "未安装", _GREY)
-                row = self.card.rows.get(tool)
-                if row:
-                    row["btn"].setEnabled(False)
+            if row:
+                # 对称启停:已装的必须启用(修复「刷新后按钮不可用」),没装的禁用。
+                row["btn"].setEnabled(installed)
         self.refresh_btn.setEnabled(True)
 
     # ── 触发测试 ────────────────────────────────────────────────────────────
@@ -246,4 +252,9 @@ class HealthCheckPage(QWidget):
         self.test_all_btn.setEnabled(not running)
         self.refresh_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
-        self.card.set_buttons_enabled(not running)
+        if running:
+            self.card.set_buttons_enabled(False)
+        else:
+            # 跑完只重启用「已安装」工具的按钮,未安装的保持禁用
+            for tool, row in self.card.rows.items():
+                row["btn"].setEnabled(tool in self._installed)
