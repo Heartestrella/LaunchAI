@@ -17,7 +17,7 @@ from qfluentwidgets import (
     PrimaryPushButton, PushButton, ToolButton,
     ComboBox, SpinBox, DoubleSpinBox,
     ProgressBar, SmoothScrollArea, CardWidget, ExpandGroupSettingCard,
-    IconWidget, InfoBar, FluentIcon as FIF, Pivot,
+    IconWidget, InfoBar, FluentIcon as FIF, Pivot,TextEdit
 )
 
 from widgets.log_text_edit import LogTextEdit
