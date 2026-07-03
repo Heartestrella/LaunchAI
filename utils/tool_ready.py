@@ -11,14 +11,19 @@ worker 之前调用 ``check(tool_id)``:
 就会被一票重依赖卡住。检查走两条:
   1) pip 包 —— 用 ``PipWorker.is_package_installed`` (importlib find_spec,
      不需要真 import,O(ms))
-  2) 仓库形式安装 (Applio / GPT-SoVITS) —— 看 ``configs/config.json::installed.<name>``
-     flag;flag 是 pip_worker 跑完整条安装流水线 (源码 patch / NLTK 资源
-     等) 才会写入的,比 import 检测更严格也更可靠
+  2) 仓库形式安装 (Applio / GPT-SoVITS) —— 先看 ``configs/config.json::installed.<name>``
+     flag,flag 是 pip_worker 跑完整条安装流水线才写入,可靠但不完备;
+     flag 缺失时回退到 ``_git_projects/<pkg>_<fork>`` 克隆目录是否存在,
+     与 subpage_switch_pages._repo_tool_installed 的判定保持一致 ——
+     避免"页面里能用、LLM 却说没装"的错配。
 
 如果新加了工具,在 _TOOL_REQUIREMENTS 里添一行即可。
 """
 
+import os
+
 from utils.configer import get_field
+from logger import debug
 
 
 # tool_id -> (pkg, friendly_page)
@@ -41,6 +46,25 @@ _TOOL_REQUIREMENTS = {
 }
 
 
+def _repo_flag_or_clone_present(name: str) -> tuple[bool, str]:
+    """仓库式工具的就绪判定,与 subpage_switch_pages._repo_tool_installed 一致。
+
+    先看 installed.<name> flag;flag 未写时回退看 _git_projects/<name>_<fork>
+    克隆目录是否存在。返回 (ok, 用于日志的判定原因)。
+    """
+    if bool(get_field(f"installed.{name}", False)):
+        return True, "flag=True"
+    # 延迟 import,避免 utils 早期模块被 pip_worker 的重依赖拖住
+    from workers.pip_worker import GIT_PROJECTS_ROOT, fork_map
+    fork = fork_map.get(name)
+    if not fork:
+        return False, "flag=False & fork_map 无映射"
+    clone_dir = os.path.join(GIT_PROJECTS_ROOT, f"{name}_{fork}")
+    if os.path.isdir(clone_dir):
+        return True, f"flag=False, 回退到克隆目录: {clone_dir}"
+    return False, f"flag=False, 克隆目录不存在: {clone_dir}"
+
+
 def check(tool_id: str):
     """工具底层包 / 仓库是否就绪。
 
@@ -50,17 +74,19 @@ def check(tool_id: str):
     """
     req = _TOOL_REQUIREMENTS.get(tool_id)
     if not req:
+        debug(f"tool_ready.check({tool_id}) → 未登记, 放行")
         return None  # 未登记的工具不强制检查 (e.g. list_dir / mix_audio)
     pkg, page = req
     if pkg.startswith("flag:"):
         name = pkg[5:]
-        ok = bool(get_field(f"installed.{name}", False))
+        ok, reason = _repo_flag_or_clone_present(name)
         display = name
+        debug(f"tool_ready.check({tool_id}) → repo:{name} ok={ok} ({reason})")
     else:
-        # 延迟 import,避免 utils/configer 这种早期模块被 worker 拖进 Qt
         from workers.pip_worker import PipWorker
         ok = PipWorker.is_package_installed(pkg)
         display = pkg
+        debug(f"tool_ready.check({tool_id}) → pip:{pkg} ok={ok}")
     if ok:
         return None
     return (f"{display} 尚未安装,请到导航栏「{page}」页完成安装后再试。"

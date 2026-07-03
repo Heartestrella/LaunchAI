@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LaunchAI · 奇点 — 一个 AI 启动器</title>
+  <meta name="description"
+    content="LaunchAI（奇点）是一个 PyQt6 桌面启动器，把 Demucs / Whisper / Real-ESRGAN / YOLO 等社区开源模型集中到统一界面之下，替你处理镜像、依赖、CUDA 版本对齐等环境问题Windows 桌面，@Estrella 单人维护">
+  <meta name="theme-color" content="#0d0f13">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&family=Noto+Serif+SC:wght@700;900&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+
+  <!-- ═════════════════════ FLOATING TOC (always visible on ≥1280) ═════════════════════ -->
+  <aside class="side-toc" id="sideToc" aria-label="页面目录">
+    <header class="toc-head">
+      <span class="toc-head-title">目录</span>
+    </header>
+    <nav class="toc-list">
+      <a href="#top" class="toc-link" data-target="top">
+        <span class="toc-num">00</span>
+        <span class="toc-label">开始</span>
+      </a>
+      <a href="#overview" class="toc-link" data-target="overview">
+        <span class="toc-num">01</span>
+        <span class="toc-label">概览</span>
+      </a>
+      <a href="#tools" class="toc-link" data-target="tools">
+        <span class="toc-num">02</span>
+        <span class="toc-label">已接管的工具</span>
+      </a>
+      <a href="#modes" class="toc-link" data-target="modes">
+        <span class="toc-num">03</span>
+        <span class="toc-label">四种调用方式</span>
+      </a>
+      <a href="#patches" class="toc-link" data-target="patches">
+        <span class="toc-num">04</span>
+        <span class="toc-label">我替你写过的补丁</span>
+      </a>
+      <a href="#notices" class="toc-link" data-target="notices">
+        <span class="toc-num">05</span>
+        <span class="toc-label">公告栏</span>
+      </a>
+    </nav>
+  </aside>
+
+  <nav class="topnav">
+    <a href="#" class="brand">
+      <span class="brand-mono">LaunchAI</span>
+      <span class="brand-cn">奇点</span>
+    </a>
+    <div class="topnav-right">
+      <a href="https://github.com/Heartestrella/LaunchAI" class="topnav-link" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://13ee.icu" class="topnav-link" target="_blank" rel="noopener">13ee.icu</a>
+      <a href="https://github.com/Heartestrella/LaunchAI" class="topnav-cta">下载</a>
+    </div>
+  </nav>
+
+  <main>
+
+    <!-- ═════════════════════ HERO ═════════════════════ -->
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="hero-left">
+        <p class="eyebrow">// 08 个开源 AI 模型 · 一个窗口</p>
+        <h1 id="hero-title">你的终端里,<br>本来是这个</h1>
+        <div class="terminal" aria-label="安装日志演示">
+          <div class="terminal-bar">
+            <span class="dot dot-r" aria-hidden="true"></span>
+            <span class="dot dot-y" aria-hidden="true"></span>
+            <span class="dot dot-g" aria-hidden="true"></span>
+            <span class="terminal-title">demucs — install log</span>
+            <button class="terminal-toggle" id="termToggle" type="button" aria-label="暂停或继续演示">暂停</button>
+          </div>
+          <pre class="terminal-body" id="term" aria-live="off"></pre>
+        </div>
+        <p class="hero-caption">上面这段每次装新模型都跑一遍LaunchAI 替你跑,只是它认得镜像、认得补丁、也不需要你在场</p>
+      </div>
+
+      <aside class="hero-right">
+        <figure class="ui-mock" aria-label="启动器主界面示意">
+          <!-- SVG mock of the Fluent-style launcher window -->
+          <svg viewBox="0 0 460 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mock-title">
+            <title id="mock-title">LaunchAI 主界面示意</title>
+            <!-- window -->
+            <rect x="0" y="0" width="460" height="320" rx="10" fill="#141821" />
+            <!-- titlebar -->
+            <rect x="0" y="0" width="460" height="26" rx="10" fill="#0f131a" />
+            <rect x="0" y="18" width="460" height="8" fill="#0f131a" />
+            <circle cx="14" cy="13" r="4" fill="#3a4150" />
+            <circle cx="28" cy="13" r="4" fill="#3a4150" />
+            <circle cx="42" cy="13" r="4" fill="#3a4150" />
+            <text x="230" y="17" font-family="JetBrains Mono, monospace" font-size="9" fill="#6c7789"
+              text-anchor="middle">LaunchAI · 奇点</text>
+            <!-- left rail -->
+            <rect x="0" y="26" width="120" height="294" fill="#0f131a" />
+            <text x="16" y="52" font-family="JetBrains Mono, monospace" font-size="9" fill="#6c7789">navigation</text>
+            <g font-family="Inter, PingFang SC, sans-serif" font-size="10" fill="#c9cfda">
+              <rect x="8" y="66" width="104" height="22" rx="4" fill="#1e2530" />
+              <text x="20" y="81">主页</text>
+              <text x="20" y="105">Demucs</text>
+              <text x="20" y="125">Whisper</text>
+              <text x="20" y="145">Real-ESRGAN</text>
+              <text x="20" y="165">YOLO</text>
+              <text x="20" y="185">RVC</text>
+              <text x="20" y="205">GPT-SoVITS</text>
+              <text x="20" y="225">Audiocraft</text>
+              <text x="20" y="245">IOPaint</text>
+              <text x="20" y="273" fill="#6c7789">节点编辑器</text>
+              <text x="20" y="293" fill="#6c7789">设置</text>
+            </g>
+            <!-- content: demucs page -->
+            <text x="140" y="52" font-family="Noto Serif SC, serif" font-weight="900" font-size="18"
+              fill="#e6e8ec">Demucs</text>
+            <text x="140" y="68" font-family="JetBrains Mono, monospace" font-size="8" fill="#8a94a3">music source
+              separation · v4.0.1</text>
+            <!-- status row -->
+            <rect x="140" y="82" width="300" height="34" rx="4" fill="#0f131a" stroke="#2a3140" />
+            <circle cx="154" cy="99" r="4" fill="#76b900" />
+            <text x="166" y="103" font-family="JetBrains Mono, monospace" font-size="9" fill="#c9cfda">installed ·
+              git+main</text>
+            <text x="430" y="103" font-family="JetBrains Mono, monospace" font-size="9" fill="#8a94a3"
+              text-anchor="end">CUDA 12.1</text>
+            <!-- waveform mock -->
+            <rect x="140" y="126" width="300" height="86" rx="4" fill="#0f131a" stroke="#2a3140" />
+            <g stroke="#3a4a5f" stroke-width="1">
+              <line x1="150" y1="169" x2="430" y2="169" />
+            </g>
+            <g stroke="#76b900" stroke-width="1.4" fill="none" opacity="0.85">
+              <path
+                d="M 150 169 L 158 155 L 166 175 L 174 148 L 182 180 L 190 145 L 198 182 L 206 152 L 214 178 L 222 158 L 230 172 L 238 160 L 246 175 L 254 155 L 262 180 L 270 148 L 278 182 L 286 150 L 294 178 L 302 155 L 310 172 L 318 162 L 326 175 L 334 156 L 342 180 L 350 150 L 358 178 L 366 155 L 374 172 L 382 160 L 390 175 L 398 155 L 406 180 L 414 148 L 422 172 L 430 169" />
+            </g>
+            <text x="150" y="203" font-family="JetBrains Mono, monospace" font-size="8" fill="#6c7789">vocals · drums ·
+              bass · other</text>
+            <!-- buttons -->
+            <rect x="140" y="222" width="118" height="30" rx="4" fill="#76b900" />
+            <text x="199" y="242" font-family="Inter, PingFang SC, sans-serif" font-size="11" font-weight="600"
+              fill="#0d0f13" text-anchor="middle">选择音频 · 分离</text>
+            <rect x="266" y="222" width="72" height="30" rx="4" fill="none" stroke="#2a3140" />
+            <text x="302" y="242" font-family="Inter, PingFang SC, sans-serif" font-size="11" fill="#c9cfda"
+              text-anchor="middle">参数</text>
+            <!-- log tail -->
+            <rect x="140" y="260" width="300" height="50" rx="4" fill="#0a0d12" stroke="#2a3140" />
+            <g font-family="JetBrains Mono, monospace" font-size="7.5" fill="#8a94a3">
+              <text x="150" y="273">$ demucs --two-stems=vocals input.mp3</text>
+              <text x="150" y="285" fill="#6c7789">Loading model: htdemucs</text>
+              <text x="150" y="297" fill="#c9cfda">Separating... <tspan fill="#76b900">100%</tspan> · 2.4s</text>
+            </g>
+          </svg>
+          <figcaption>它替你跑完之后,你看到的是这个</figcaption>
+        </figure>
+
+        <a class="cta-primary" href="https://github.com/Heartestrella/LaunchAI">
+          <span class="cta-label">下载 Windows 版</span>
+          <span class="cta-note">GitHub Releases · v0.0.0 Build 1</span>
+        </a>
+        <p class="cta-fine">MIT · @Heartestrella · 唯一发布地点在 GitHub</p>
+      </aside>
+    </section>
+
+    <!-- ═════════════════════ OVERVIEW ═════════════════════ -->
+    <section class="overview" id="overview" aria-labelledby="overview-title">
+      <header class="section-head">
+        <h2 id="overview-title"># 页面速览</h2>
+        <p class="section-note">
+          按顺序看是叙事,按需跳读也无碍<br>
+          左边的目录抽屉随时打开,回顶按钮跟着滚动出现
+        </p>
+      </header>
+
+      <ol class="overview-list">
+        <li>
+          <a href="#tools">
+            <span class="ov-num">01</span>
+            <span class="ov-title">已接管的工具</span>
+            <span class="ov-dots" aria-hidden="true"></span>
+            <span class="ov-note">8 个开源模型,原名不改</span>
+          </a>
+        </li>
+        <li>
+          <a href="#modes">
+            <span class="ov-num">02</span>
+            <span class="ov-title">四种调用方式</span>
+            <span class="ov-dots" aria-hidden="true"></span>
+            <span class="ov-note">UI · 节点 · LLM · HTTP</span>
+          </a>
+        </li>
+        <li>
+          <a href="#patches">
+            <span class="ov-num">03</span>
+            <span class="ov-title">我替你写过的补丁</span>
+            <span class="ov-dots" aria-hidden="true"></span>
+            <span class="ov-note">3 处上游社区的硬编码坑</span>
+          </a>
+        </li>
+        <li>
+          <a href="#notices">
+            <span class="ov-num">04</span>
+            <span class="ov-title">公告栏</span>
+            <span class="ov-dots" aria-hidden="true"></span>
+            <span class="ov-note">一字不改的原始声明</span>
+          </a>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ═════════════════════ TOOLS ═════════════════════ -->
+    <section class="tools" id="tools" aria-labelledby="tools-title">
+      <header class="section-head">
+        <h2 id="tools-title"># 已接管的工具</h2>
+        <p class="section-note">用社区的原版命名不改成"音频分离神器"、也不叫"AI 加速引擎"<br>目标用户已经知道这些词的意思了</p>
+      </header>
+
+      <div class="tool-table" role="table" aria-label="已接管的工具清单">
+        <div class="tool-head" role="row">
+          <span role="columnheader">name</span>
+          <span role="columnheader">version</span>
+          <span role="columnheader">purpose</span>
+          <span role="columnheader">install</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">demucs</span>
+          <span class="tool-ver" role="cell">v4.0.1</span>
+          <span class="tool-desc" role="cell">music source separation</span>
+          <span class="tool-src" role="cell">git · main</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">whisper</span>
+          <span class="tool-ver" role="cell">large-v3</span>
+          <span class="tool-desc" role="cell">speech recognition</span>
+          <span class="tool-src" role="cell">pypi</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">Real-ESRGAN</span>
+          <span class="tool-ver" role="cell">x4plus</span>
+          <span class="tool-desc" role="cell">image super-resolution</span>
+          <span class="tool-src" role="cell">git · master + ncnn</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">yolo</span>
+          <span class="tool-ver" role="cell">v8</span>
+          <span class="tool-desc" role="cell">object detection</span>
+          <span class="tool-src" role="cell">pypi</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">rvc</span>
+          <span class="tool-ver" role="cell">v2</span>
+          <span class="tool-desc" role="cell">voice conversion</span>
+          <span class="tool-src" role="cell">git</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">GPT-SoVITS</span>
+          <span class="tool-ver" role="cell">v2</span>
+          <span class="tool-desc" role="cell">TTS · voice cloning</span>
+          <span class="tool-src" role="cell">git</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">audiocraft</span>
+          <span class="tool-ver" role="cell">v1.3</span>
+          <span class="tool-desc" role="cell">musicgen · audiogen</span>
+          <span class="tool-src" role="cell">pypi</span>
+        </div>
+        <div class="tool-row" role="row">
+          <span class="tool-name" role="cell">iopaint</span>
+          <span class="tool-ver" role="cell">v1.5</span>
+          <span class="tool-desc" role="cell">image inpainting</span>
+          <span class="tool-src" role="cell">pypi</span>
+        </div>
+      </div>
+
+      <p class="tools-footnote">
+        每一个都能被下面四种方式调用:动手、连线、说话、或走 HTTP
+      </p>
+    </section>
+
+    <!-- ═════════════════════ MODES ═════════════════════ -->
+    <section class="modes" id="modes" aria-labelledby="modes-title">
+      <header class="section-head">
+        <h2 id="modes-title"># 四种调用方式,给不同的人</h2>
+        <p class="section-note">
+          背后是同一份 worker,前面开了四条口子<br>
+          动手、连线、说话、或者让程序打过来 —— 挑一个你今天顺手的
+        </p>
+      </header>
+
+      <div class="modes-grid modes-grid-4">
+
+        <!-- ── 01 · UI ────────────────────────────────────── -->
+        <article class="mode mode-ui">
+          <header class="mode-head">
+            <span class="mode-kicker">// 01 · UI</span>
+            <h3>打开子页面,像用桌面软件那样</h3>
+            <p class="mode-desc">
+              侧栏点工具,右边选文件、调参数、按一个按钮就跑
+              波形、进度条、日志共享同一屏,没有第二个窗口需要盯
+            </p>
+          </header>
+
+          <figure class="mode-shot">
+            <div class="mode-shot-frame">
+              <!-- 加载失败自动移除,占位重新出现 -->
+              <img src="images/mode-ui.png" alt="子页面截图" loading="lazy" onerror="this.remove()">
+              <span class="mode-shot-placeholder">
+                <span class="mode-shot-filename">images/mode-ui.png</span>
+                <span class="mode-shot-hint">// 待补:任一子页面(例如 Demucs / Whisper)</span>
+              </span>
+            </div>
+            <figcaption>你看到的就是主界面本身</figcaption>
+          </figure>
+
+          <footer class="mode-foot">
+            <span class="mode-tag">给 · 想动手的人</span>
+            <span class="mode-tag">反馈 · 进度 + 日志同屏</span>
+          </footer>
+        </article>
+
+        <!-- ── 02 · GRAPH ────────────────────────────────────── -->
+        <article class="mode mode-node">
+          <header class="mode-head">
+            <span class="mode-kicker">// 02 · GRAPH</span>
+            <h3>把工具串成一张 DAG</h3>
+            <p class="mode-desc">
+              类<kbd>Blender</kbd>的操作逻辑 —— 你把工具当节点、连线、填参数,LaunchAI 按拓扑序跑完
+            </p>
+          </header>
+
+          <figure class="mode-shot">
+            <div class="mode-shot-frame">
+              <img src="images/mode-node.png" alt="节点编辑器截图" loading="lazy" onerror="this.remove()">
+              <span class="mode-shot-placeholder">
+                <span class="mode-shot-filename">images/mode-node.png</span>
+                <span class="mode-shot-hint">// 待补:节点编辑器画布(建议连一条 File → Demucs → Whisper)</span>
+              </span>
+            </div>
+            <figcaption>一张图连完,拓扑序自动排</figcaption>
+          </figure>
+
+          <footer class="mode-foot">
+            <span class="mode-tag">给 · 想编排流水线的人</span>
+            <span class="mode-tag">端口色 · audio / text / image / json</span>
+          </footer>
+        </article>
+
+        <!-- ── 03 · LLM ────────────────────────────────────── -->
+        <article class="mode mode-llm">
+          <header class="mode-head">
+            <span class="mode-kicker">// 03 · LLM</span>
+            <h3>说人话,它自己拆成节点</h3>
+            <p class="mode-desc">
+              接一个 LLM 端点,你只需描述目标——"把这首歌的人声抠出来,再转成字幕"
+              LLM 把这句话拆成节点图、填好参数、按拓扑序跑完 —— 返回给你文件
+            </p>
+          </header>
+
+          <figure class="mode-shot">
+            <div class="mode-shot-frame">
+              <img src="images/mode-llm.png" alt="LLM 自然语言调用截图" loading="lazy" onerror="this.remove()">
+              <span class="mode-shot-placeholder">
+                <span class="mode-shot-filename">images/mode-llm.png</span>
+                <span class="mode-shot-hint">// 待补:自然语言 → 生成的节点图 → 执行过程</span>
+              </span>
+            </div>
+            <figcaption>自然语言进,可执行的节点图出</figcaption>
+          </figure>
+
+          <footer class="mode-foot">
+            <span class="mode-tag">给 · 不想学界面的人</span>
+            <span class="mode-tag">输入 · 自然语言</span>
+            <span class="mode-tag">复用 · 同一套节点</span>
+          </footer>
+        </article>
+
+        <!-- ── 04 · HTTP ────────────────────────────────────── -->
+        <article class="mode mode-api">
+          <header class="mode-head">
+            <span class="mode-kicker">// 04 · HTTP</span>
+            <h3>一个端点,多种工具</h3>
+            <p class="mode-desc">
+              设置页打开HTTP SERVER 开放本地工具到外网
+            </p>
+          </header>
+
+          <pre class="mode-code" aria-label="调用示例"><code>$ curl -X POST http://127.0.0.1:8000/v1/invoke \
+    -H <span class="hl-cuda">"Authorization: Bearer $LAUNCHAI_KEY"</span> \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": <span class="hl-cuda">"demucs"</span>,
+      "input": "/path/to/song.mp3",
+      "parameters": { "two_stems": "vocals" },
+      "stream": true
+    }'
+
+<span class="hl-muted"># ← SSE 事件流</span>
+event: progress
+data: {"pct": 24, "status": "loading htdemucs"}
+event: progress
+data: {"pct": 87, "status": "separating"}
+event: result
+data: {"path": "data/outputs/demucs/vocals.wav"}</code></pre>
+
+          <footer class="mode-foot">
+            <span class="mode-tag">给 · 想让程序调用的人</span>
+            <span class="mode-tag">GET /v1/models</span>
+            <span class="mode-tag">POST /v1/tools/&lt;tool&gt;/upload</span>
+            <span class="mode-tag">GET /v1/files?path=</span>
+          </footer>
+        </article>
+
+      </div>
+
+    </section>
+
+    <!-- ═════════════════════ PATCHES ═════════════════════ -->
+    <section class="patches" id="patches" aria-labelledby="patches-title">
+      <header class="section-head">
+        <h2 id="patches-title"># 我替你写过的补丁</h2>
+        <p class="section-note">上游社区留下的坑,LaunchAI 里已经埋好了<br>你不用知道它们的存在——但既然你在看这个页面,你可能想知道</p>
+      </header>
+
+      <div class="patch-grid">
+        <article class="patch">
+          <header class="patch-head">
+            <span class="patch-num">01</span>
+            <div>
+              <h3>basicsr / torchvision 改名</h3>
+              <p class="patch-loc">site-packages/basicsr/data/degradations.py:8</p>
+            </div>
+          </header>
+          <pre class="patch-code"><code><span class="line-del">- from torchvision.transforms.functional_tensor import rgb_to_grayscale</span>
+<span class="line-add">+ from torchvision.transforms.functional        import rgb_to_grayscale</span></code></pre>
+          <p class="patch-note">basicsr 引用了 torchvision 早期版本里、后来被删掉的路径装 Real-ESRGAN 前先把这一行替换回来,不然
+            <code>ImportError</code>
+          </p>
+        </article>
+
+        <article class="patch">
+          <header class="patch-head">
+            <span class="patch-num">02</span>
+            <div>
+              <h3>demucs requirements 过滤</h3>
+              <p class="patch-loc">demucs/requirements_minimal.txt</p>
+            </div>
+          </header>
+          <pre class="patch-code"><code>grep -v '^torch' requirements_minimal.txt \
+  &gt; requirements_filtered.txt
+<span class="hl-orange"># 已经在上一步装了 torch+cu121,再装一次会拉回 CPU 版</span>
+echo "soundfile" &gt;&gt; requirements_filtered.txt  <span class="hl-muted"># Windows only</span></code></pre>
+          <p class="patch-note">demucs 的 requirements 里写死 <code>torch</code>,pip 会用无 CUDA 的 CPU 轮子覆盖已装好的
+            <code>torch+cu121</code>过滤掉再装
+          </p>
+        </article>
+
+        <article class="patch">
+          <header class="patch-head">
+            <span class="patch-num">03</span>
+            <div>
+              <h3>Real-ESRGAN 安装顺序</h3>
+              <p class="patch-loc">workers/pip_worker.py::install_from_git</p>
+            </div>
+          </header>
+          <pre class="patch-code"><code>pip install tb-nightly                <span class="hl-muted"># 先</span>
+pip install basicsr                   <span class="hl-muted"># 再</span>
+<span class="hl-green">apply_patch(basicsr/degradations.py)  # 顺手修上面的坑</span>
+pip install facexlib gfpgan           <span class="hl-muted"># 然后</span>
+python setup.py develop               <span class="hl-muted"># 最后</span></code></pre>
+          <p class="patch-note">顺序反了会一路报错<code>basicsr</code> 前得先有 <code>tb-nightly</code>,<code>gfpgan</code> 前得先修
+            basicsr,<code>develop</code> 前得先装完所有 runtime</p>
+        </article>
+      </div>
+
+      <p class="patches-footnote">
+        这类补丁散布在 <code>workers/pip_worker.py</code> 里,总共十几处<br>
+        <span class="muted">每一处都是被"能不能装上"这一条约束反复打磨出来的</span>
+      </p>
+    </section>
+
+    <!-- ═════════════════════ NOTICE BOARD ═════════════════════ -->
+    <section class="notice-board" id="notices" aria-labelledby="notice-title">
+      <header class="section-head">
+        <h2 id="notice-title"># 公告栏</h2>
+        <!-- <p class="section-note">和启动器主页上的公告一字不改</p> -->
+      </header>
+
+      <ol class="notices">
+        <li class="notice notice-warn">
+          <span class="notice-tag">[警告]</span>
+          <time datetime="2026-06-01">2026-06-01</time>
+          <p>Github 开源项目 请勿用于盈利性用途 归属个人所有</p>
+        </li>
+        <li class="notice notice-say">
+          <span class="notice-tag">[声明]</span>
+          <time datetime="2026-06-01">2026-06-01</time>
+          <p>本启动器免费提供,如您通过其他渠道付费获得本软件,请立即退款并投诉相应商家</p>
+        </li>
+        <li class="notice notice-off">
+          <span class="notice-tag">[官方渠道]</span>
+          <time datetime="2026-06-01">2026-06-01</time>
+          <p>本启动器唯一发布地点位于 Github <a href="https://github.com/Heartestrella/LaunchAI" target="_blank"
+              rel="noopener">@Heartestrella</a>
+            请认准官方来源</p>
+        </li>
+      </ol>
+    </section>
+
+  </main>
+
+  <!-- ═════════════════════ FOOTER ═════════════════════ -->
+  <footer class="foot">
+    <div class="foot-left">
+      <p class="foot-line">
+        <span>@Estrella</span>
+        <span class="foot-sep">·</span>
+        <a href="https://13ee.icu" target="_blank" rel="noopener">13ee.icu</a>
+        <span class="foot-sep">·</span>
+        <a href="https://github.com/Heartestrella/LaunchAI" target="_blank" rel="noopener">GitHub</a>
+      </p>
+      <p class="foot-line foot-meta">
+        <span>Windows only</span>
+        <span class="foot-sep">·</span>
+        <span>py311 embedded</span>
+        <span class="foot-sep">·</span>
+        <span>v0.0.0 Build 1 · 2026-06-01</span>
+      </p>
+      <p class="foot-line foot-tiny">
+        本页在你的电脑上跑,没有分析脚本
+      </p>
+    </div>
+    <div class="foot-right" aria-hidden="true">
+      <div class="foot-mark">
+        <span class="foot-mark-cn">奇点</span>
+        <span class="foot-mark-en">/singularity/</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ═════════════════════ LIGHTBOX (mode-shot 放大查看) ═════════════════════ -->
+  <div class="lightbox" id="lightbox" role="dialog" aria-modal="true" aria-labelledby="lightbox-cap" hidden>
+    <button class="lightbox-close" id="lightboxClose" type="button" aria-label="关闭大图">×</button>
+    <figure class="lightbox-body">
+      <img class="lightbox-img" alt="">
+      <figcaption class="lightbox-cap" id="lightbox-cap"></figcaption>
+    </figure>
+  </div>
+
+  <!-- ═════════════════════ BACK TO TOP ═════════════════════ -->
+  <button class="back-top" id="backTop" type="button" aria-label="回到顶部" hidden>
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5" />
+      <path d="M5 12l7-7 7 7" />
+    </svg>
+    <span class="back-top-label">回顶</span>
+  </button>
+
+  <script src="main.js"></script>
+</body>
+
+</html>

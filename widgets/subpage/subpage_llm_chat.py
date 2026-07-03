@@ -985,9 +985,16 @@ def _build_tool_prompt() -> str:
 SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + _build_tool_prompt()
 
 
-# `<tool_call> ... </tool_call>` 解析。标签内允许跨行；
-# 用 `.+?` 非贪婪匹配整段，JSON 解析失败则跳过这一段。
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.+?)\s*</tool_call>", re.DOTALL)
+# `<tool_call> ... </tool_call>` 解析。标签内允许跨行；用 `.+?` 非贪婪匹配整段。
+# 有些模型 (尤其 DeepSeek / Qwen 系,或被 max_tokens 截断时) 会漏 `</tool_call>`,
+# 所以再准备一个只匹配起始标签的正则和「取回未闭合尾巴」的解析器,免得整轮
+# tool call 被静默丢弃。
+_TOOL_CALL_RE = re.compile(
+    r"<tool_call>\s*(.+?)\s*</tool_call>", re.DOTALL | re.IGNORECASE)
+_TOOL_CALL_OPEN_RE = re.compile(r"<tool_call>", re.IGNORECASE)
+# 从 `<tool_call>` 起一直吃到消息结尾,给"漏闭合"分支用
+_TOOL_CALL_TAIL_RE = re.compile(
+    r"<tool_call>[\s\S]*$", re.IGNORECASE)
 
 
 # ============================================================================
@@ -2827,7 +2834,9 @@ class LLMChatPage(QWidget):
         #  - 有工具调用 -> 隐藏标签原文,只显示标签外的普通文字(更干净);
         #  - 无工具调用 -> 走原来的展示路径。
         calls = self._parse_tool_calls(full or "")
-        display_text = _TOOL_CALL_RE.sub("", full or "").strip()
+        # 先剪闭合对,再吃掉最后一段没关的 <tool_call> 尾巴 (parser 已经消化过它了)
+        display_text = _TOOL_CALL_RE.sub("", full or "")
+        display_text = _TOOL_CALL_TAIL_RE.sub("", display_text).strip()
 
         if self._streaming_bubble:
             self._streaming_bubble.set_streaming(False)
@@ -2854,27 +2863,87 @@ class LLMChatPage(QWidget):
     def _parse_tool_calls(self, text: str) -> list[dict]:
         """从 LLM 输出里抽 <tool_call>{json}</tool_call> 块。
         允许 LLM 在标签内套 ```json ... ``` 代码栅栏,会自动剥掉。
+        如果最后一个 <tool_call> 没有 </tool_call> 尾标签 (被截断或模型漏写),
+        再退一步用平衡花括号扫描找到 JSON,不要因为一个尾标签把整轮 tool call 丢掉。
         """
         out: list[dict] = []
+        matched_spans: list[tuple[int, int]] = []
         for m in _TOOL_CALL_RE.finditer(text):
-            raw = m.group(1).strip()
-            if raw.startswith("```"):
-                # 剥掉首尾代码栅栏(可能写成 ```json)
-                lines = raw.splitlines()
-                if len(lines) >= 2 and lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip().startswith("```"):
-                    lines = lines[:-1]
-                raw = "\n".join(lines).strip()
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
+            matched_spans.append(m.span())
+            obj = self._parse_tool_call_body(m.group(1))
+            if obj is not None:
+                out.append(obj)
+
+        # 有开标签但没被上面正则匹上的 —— 意味着漏了 </tool_call>。
+        # 只处理"排在所有闭合命中之后"的那些开标签,免得干扰前面正常闭合的对。
+        last_matched_end = matched_spans[-1][1] if matched_spans else 0
+        for om in _TOOL_CALL_OPEN_RE.finditer(text, last_matched_end):
+            body = self._extract_json_after(text, om.end())
+            if body is None:
                 continue
-            if isinstance(obj, dict) and isinstance(obj.get("name"), str):
-                if not isinstance(obj.get("arguments"), dict):
-                    obj["arguments"] = {}
+            obj = self._parse_tool_call_body(body)
+            if obj is not None:
                 out.append(obj)
         return out
+
+    def _parse_tool_call_body(self, raw: str) -> dict | None:
+        """把 <tool_call> 里的一段文本解析成 {name, arguments} dict, 失败返回 None."""
+        raw = raw.strip()
+        if raw.startswith("```"):
+            lines = raw.splitlines()
+            if len(lines) >= 2 and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            raw = "\n".join(lines).strip()
+        # 若结尾带遗留 `</tool_call>` (万一) 或前后杂空白,再收一次
+        raw = raw.rstrip("`").strip()
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        if not (isinstance(obj, dict) and isinstance(obj.get("name"), str)):
+            return None
+        if not isinstance(obj.get("arguments"), dict):
+            obj["arguments"] = {}
+        return obj
+
+    @staticmethod
+    def _extract_json_after(text: str, start: int) -> str | None:
+        """从 `text[start:]` 里定位第一个 `{`,按平衡花括号扫描把整个 JSON 对象切出来。
+        支持字符串内的 `{}` 转义与 `\\"` 转义。返回不带前后杂物的 JSON 文本。
+        找不到平衡尾就返回 None(说明确实被截断得连 JSON 都没写完,交给上层放弃)。
+        """
+        n = len(text)
+        i = start
+        while i < n and text[i] != "{":
+            i += 1
+        if i >= n:
+            return None
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        while j < n:
+            ch = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[i:j + 1]
+            j += 1
+        return None
 
     def _execute_tool_calls(self, calls: list[dict]):
         self._pending_tool_calls = list(calls)

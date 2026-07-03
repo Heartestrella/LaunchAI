@@ -417,7 +417,7 @@ class WaveformCanvas(QWidget):
 # ─── main window ─────────────────────────────────────────────────────────────
 class AudioWaveformWidget(QWidget):
 
-    def __init__(self):
+    def __init__(self,default_music : str = None):
         super().__init__()
         setTheme(Theme.DARK)
         setThemeColor("#0078D4")
@@ -439,7 +439,8 @@ class AudioWaveformWidget(QWidget):
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._play_tick)
-
+        if default_music:
+            self.load_file(default_music)
     # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         self.setWindowTitle("AudioWaveformWidget — Fluent Design")
