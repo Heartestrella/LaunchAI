@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import json
+import base64
 import html as _htmllib
 import mimetypes
 import urllib.request
@@ -24,7 +25,7 @@ from PyQt6.QtWidgets import (
 
 from qfluentwidgets import (
     TitleLabel, BodyLabel, CaptionLabel, StrongBodyLabel,
-    PrimaryPushButton, PushButton, TransparentToolButton,
+    PrimaryPushButton, PushButton, TransparentToolButton, SwitchButton,
     LineEdit, PasswordLineEdit, TextEdit, ComboBox, EditableComboBox,
     CardWidget, SmoothScrollArea,
     IconWidget, InfoBar, InfoBarPosition, FluentIcon as FIF,
@@ -84,19 +85,42 @@ PILL_FG_WARN = "#E6B97A"
 INPUT_MIN_H = 36
 INPUT_MAX_H = 140
 
+# 请求超时(秒):
+#   REQUEST_TIMEOUT_DEFAULT 用于 /chat/completions 流式请求 —— socket 每个 read
+#     操作最多等这么久;设 60 是因为一个 chunk 之间不应该间隔更长,再长基本是
+#     网络 / 服务端卡死。可通过 configs/config.json 里 llm_chat.request_timeout
+#     覆盖(慢机器 / 长上下文场景可以调到 120+)
+#   MODELS_TIMEOUT 用于 GET /models 探测,轻量 GET,15s 够用
+REQUEST_TIMEOUT_DEFAULT = 60
+MODELS_TIMEOUT = 15
+
+# 反 tool_call 无限循环护栏:
+#   MAX_TOOL_CALL_OPENS —— 单轮回复里 `<tool_call>` 开标签硬上限。真实工作链
+#     几乎不会超过 4~5 个;超过这个数基本是模型陷入重复输出(尤其小模型
+#     碰到上一轮 tool_result 报错时,会锁死"道歉 -> tool_call"模式)
+#   触到任一护栏就 abort 流,给用户明确文案,避免把 token 烧到崩
+MAX_TOOL_CALL_OPENS = 8
+
 
 # ============================================================================
 # System Prompt —— 写死，每次请求自动拼到 messages[0]
 # 由“职责段” + “工具调用协议段”拼成，后者从 TOOL_REGISTRY 自动渲染，
 # 新增工具只动 TOOL_REGISTRY 即可同步进 prompt。
 # ============================================================================
-SYSTEM_PROMPT_BASE = """你是 LaunchAI（奇点）内置的智能助手。
-你的职责：
-1. 用清晰、中肯的中文回答用户关于本地 AI 工具（Whisper / Demucs / Real-ESRGAN / YOLO / GPT-SoVITS / RVC / IOPaint / AudioCraft）的使用问题。
-2. 当用户上传文件 / 目录时，结合内容进行分析、摘要、改写或答疑；遇到目录附件请用 list_dir / read_file 自行探查里面有什么。
-3. 涉及命令、参数、错误日志时，优先给出可直接复制运行的结果，并用 ``` 代码块包裹。
-4. 不要编造模型名称、文件路径或参数；不确定时如实说明。
-5. 回答简洁，不需要客套，不要重复用户提问。
+SYSTEM_PROMPT_BASE = """你是 LaunchAI(奇点)内置助手。
+职责:
+1. 中肯的中文回答本地 AI 工具(Whisper/Demucs/Real-ESRGAN/YOLO/GPT-SoVITS/RVC/IOPaint/AudioCraft)相关问题
+2. 用户传文件/目录时结合内容分析、摘要、答疑;目录用 list_dir/read_file 探查
+3. 命令/参数/日志给可复制运行的结果,用 ``` 包起
+4. 不编造模型名/路径/参数;不确定就说不确定
+5. 简洁,不客套,不复述用户提问
+
+## 图片附件默认行为
+消息里 `--- 图片: name ---` 且本轮以视觉输入送达时,**你已直接看到这张图**。默认用视觉直接观察作答:
+- 问"是什么/有什么/写着什么/在做什么/多少个" -> 直接看图作答,**别调 yolo_detect**(该工具仅用户明确要"画检测框/YOLO/COCO 标注"时用)
+- 放大/超分/清晰化 -> 才调 realesrgan_upscale;单纯"看看"不动它
+- OCR/读图上文字/看截图排版 -> 直接答,别 read_file 读图
+简言之: **能一眼看到就一眼看到,只有用户明确要"检测框/放大/批量处理"才动工具。**
 """
 
 
@@ -156,830 +180,402 @@ _REALESRGAN_DEFAULT_MODEL = next(
 )
 
 
-# 工具表 —— 新增工具时在这里加一项，prompt 与执行调度都会同步生效。
+# 工具表 —— 新增工具时在这里加一项,prompt 与执行调度都会同步生效。
 # 字段:
-#   summary  : 一行简介，写给 LLM 看
-#   params   : {name: {type, required, default?, enum?, desc}}
-#   returns  : 成功返回值的描述
+#   summary  : 简介,写给 LLM 看 —— 尽量 1-2 行,只保留触发词 + 关键链路
+#   params   : {name: {type, required, default?, enum?, desc}} —— desc 能省则省,
+#              渲染器会跳过空 desc,只留类型/enum/default 就够 LLM 正确生成 JSON
+#   returns  : 成功返回值的描述,可省
 TOOL_REGISTRY: dict[str, dict] = {
     "list_dir": {
-        "summary": (
-            "列出某个目录里的文件和子目录,用来探查用户给的素材 / 数据集文件夹里有什么。"
-            "默认只列一层;给 recursive=true 时最多展开 2 层。"
-            "返回的每个条目都带绝对路径,后续工具调用可直接复制使用,不要再做手工拼接。"
-        ),
+        "summary": "列目录一层(recursive=true 最多 2 层 200 条);每条含绝对路径,后续工具直接复制用。",
         "params": {
-            "path": {
-                "type": "string",
-                "required": True,
-                "desc": "要列出内容的目录绝对路径(通常来自用户消息里的"
-                        " `--- 目录: ...` 附件标记)",
-            },
-            "recursive": {
-                "type": "boolean",
-                "required": False,
-                "default": False,
-                "desc": "是否递归子目录,默认 false;true 时最多展开 2 层并最多列 200 条",
-            },
+            "path": {"type": "string", "required": True, "desc": "目录绝对路径"},
+            "recursive": {"type": "boolean", "required": False, "default": False},
         },
-        "returns": (
-            "JSON 字符串:{path, count, truncated, entries:[{name,type,size,path}]}。"
-            "type 是 file 或 dir;size 单位字节,目录为 null;path 是该条目的绝对路径。"
-        ),
+        "returns": "JSON: {path, count, truncated, entries:[{name, type(file/dir), size, path}]}",
     },
     "read_file": {
-        "summary": (
-            "读取一个本地文本文件的内容,用来查看 SoVITS 的 .list 转写清单 / "
-            ".txt 转写 / .json 配置等。"
-            "不要用它读模型权重(.ckpt/.pth)、音频或其它二进制文件。"
-        ),
+        "summary": "读文本文件(SoVITS .list / 转写 / 配置)。不要用它读权重、音频或其它二进制。",
         "params": {
-            "path": {
-                "type": "string",
-                "required": True,
-                "desc": "要读取的文件绝对路径",
-            },
-            "max_bytes": {
-                "type": "number",
-                "required": False,
-                "default": 65536,
-                "desc": "最多读取多少字节,默认 64 KB,上限 1 MB;超出会自动截断",
-            },
+            "path": {"type": "string", "required": True, "desc": "文件绝对路径"},
+            "max_bytes": {"type": "number", "required": False, "default": 65536,
+                          "desc": "上限 1 MB,超出截断"},
         },
-        "returns": (
-            "首行是元信息 `[path: ..., size: ..., returned_bytes: ..., truncated: ...]`,"
-            "之后是文件文本内容(UTF-8 解码,errors=replace)"
-        ),
+        "returns": "首行 `[path:.., size:.., returned_bytes:.., truncated:..]` 后跟文本",
     },
     "demucs_separate": {
         "summary": (
-            "调用本地 Demucs 把音频分离;两种模式根据 two_stems 切换:"
-            "\n  - 省略 two_stems(默认):4 轨全分,产出 vocals.wav / drums.wav / bass.wav / other.wav"
-            "\n  - two_stems=\"vocals\"(最常用):2 轨分,产出 vocals.wav(人声) + no_vocals.wav(其余三轨混合后的纯伴奏)"
-            "\n  - two_stems=\"drums/bass/other\":同理,产出 <stem>.wav + no_<stem>.wav"
-            "\n\n做翻唱 / 换声场景几乎都用 two_stems=\"vocals\":先拿到 vocals.wav 喂 RVC 或 GPT-SoVITS 换音色,"
-            "拿到处理后的新人声后用 mix_audio 把新人声和原 no_vocals.wav 伴奏混回去得到成品。"
+            "Demucs 音频分离。默认 4 轨(vocals/drums/bass/other);"
+            "two_stems='vocals' 出 vocals.wav + no_vocals.wav。"
+            "翻唱换声标准链: demucs vocals -> rvc_convert 或 gptsovits_tts 换音色 -> mix_audio 与 no_vocals 混回。"
         ),
         "params": {
-            "input": {
-                "type": "string",
-                "required": True,
-                "desc": "待分离音频的本地绝对路径,支持 .mp3 / .wav / .flac / .m4a 等",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": "htdemucs",
-                "enum": ["htdemucs", "htdemucs_ft", "mdx_extra", "mdx"],
-                "desc": "Demucs 模型名,默认 htdemucs",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda",
-                "enum": ["cuda", "cpu"],
-                "desc": "推理设备,默认 cuda;无独立显卡或显存不够填 cpu",
-            },
-            "two_stems": {
-                "type": "string",
-                "required": False,
-                "default": None,
-                "enum": ["vocals", "drums", "bass", "other"],
-                "desc": "2 轨分离:产出 <stem>.wav + no_<stem>.wav 两文件。"
-                        "翻唱 / 换声场景填 \"vocals\";想 4 轨全分就省略",
-            },
-            "format": {
-                "type": "string",
-                "required": False,
-                "default": "wav",
-                "enum": ["wav", "mp3", "flac"],
-                "desc": "输出格式,默认 wav",
-            },
+            "input": {"type": "string", "required": True, "desc": "音频绝对路径"},
+            "model": {"type": "string", "required": False, "default": "htdemucs",
+                       "enum": ["htdemucs", "htdemucs_ft", "mdx_extra", "mdx"]},
+            "device": {"type": "string", "required": False, "default": "cuda",
+                        "enum": ["cuda", "cpu"]},
+            "two_stems": {"type": "string", "required": False, "default": None,
+                           "enum": ["vocals", "drums", "bass", "other"],
+                           "desc": "2 轨模式;翻唱选 vocals"},
+            "format": {"type": "string", "required": False, "default": "wav",
+                        "enum": ["wav", "mp3", "flac"]},
         },
-        "returns": (
-            "成功时返回**分离结果子目录**的绝对路径(形如 <output_root>/<model>/<input_stem>/),"
-            "其下分模式包含:"
-            "\n  - 默认 4 轨:vocals.wav / drums.wav / bass.wav / other.wav"
-            "\n  - two_stems=vocals:vocals.wav + no_vocals.wav(no_vocals 即纯伴奏混合轨,后续 mix_audio 用)"
-            "\n聊天里会自动列出这些文件并附预览按钮。"
-        ),
+        "returns": "分离子目录绝对路径 <output>/<model>/<stem>/ (4 轨: vocals/drums/bass/other; 2 轨: <stem> + no_<stem>)",
     },
     "mix_audio": {
         "summary": (
-            "用 ffmpeg 把多路音频合并成一路。两种模式:"
-            "\n  - mix(默认,amix 叠加):同时播放多路,长度取最长,可调权重。"
-            "翻唱场景标准用法:把 RVC / SoVITS 处理后的新人声 与 demucs 产出的 no_vocals.wav 伴奏 amix 起来,得到成品。"
-            "\n  - concat(顺序拼接):多路首尾相连,要求各路采样率 / 声道一致。适合拼合辑。"
-            "\n输入路径必须都是已经存在的本地文件;调本工具前确保上游(demucs / RVC 等)已经跑完。"
+            "ffmpeg 合并多路音频。mode=mix (amix 叠加,翻唱标准: [新人声, no_vocals], weights [1.0, 0.6~0.8]);"
+            " mode=concat (首尾拼接,要求同采样率同声道)。"
         ),
         "params": {
-            "inputs": {
-                "type": "array",
-                "required": True,
-                "desc": "至少 1 路本地音频绝对路径数组。"
-                        "翻唱场景两路即可:[<rvc/sovits 处理后的 vocals>, <demucs 的 no_vocals.wav>]。"
-                        "只传 1 路时直接复制,不走 ffmpeg",
-            },
-            "mode": {
-                "type": "string",
-                "required": False,
-                "default": "mix",
-                "enum": ["mix", "concat"],
-                "desc": "mix=同时播放叠加(默认);concat=顺序拼接",
-            },
-            "weights": {
-                "type": "array",
-                "required": False,
-                "default": None,
-                "desc": "各路权重(数字数组),长度与 inputs 对齐;省略时各路 1.0 等权。"
-                        "翻唱常用 [1.0, 0.6~0.8](人声满,伴奏压低一点),听感更舒服。"
-                        "仅 mode=mix 生效",
-            },
-            "format": {
-                "type": "string",
-                "required": False,
-                "default": "wav",
-                "enum": ["wav", "mp3", "flac"],
-                "desc": "输出格式,默认 wav",
-            },
+            "inputs": {"type": "array", "required": True, "desc": "音频绝对路径数组,至少 1 路"},
+            "mode": {"type": "string", "required": False, "default": "mix",
+                      "enum": ["mix", "concat"]},
+            "weights": {"type": "array", "required": False, "default": None,
+                         "desc": "各路权重数字数组,省略等权;仅 mix 生效"},
+            "format": {"type": "string", "required": False, "default": "wav",
+                        "enum": ["wav", "mp3", "flac"]},
         },
-        "returns": "成功时返回合成音频的绝对路径,聊天里会自动出现可播放卡片",
+        "returns": "合成音频绝对路径",
     },
     "whisper_transcribe": {
         "summary": (
-            "调用本地 Whisper 把音频(或视频音轨)转成文字 / 字幕。"
-            "支持一次传一个文件,也支持把一个文件数组一次性批量转录。"
-            "\n用户如果丢的是目录,先用 list_dir 列出里面的音频文件,"
-            "再把命中的路径以数组形式传给 input,工具会顺序处理并落到同一个输出目录。"
-            "\n常见耗时: small 模型 1 分钟音频在 GPU 上 5~15 秒;"
-            "large 系列慢 5~10 倍,设备改 cpu 再慢 10 倍以上,告诉用户合理预期。"
+            "Whisper 转写音频为文字/字幕。input 支持单文件或数组;"
+            "目录场景先 list_dir 找音频再传数组。small 快糙 / medium 平衡 / large 高质慢。"
         ),
         "params": {
-            "input": {
-                "type": "string | array",
-                "required": True,
-                "desc": "待转录音频的本地绝对路径;可传单字符串,也可传字符串数组批量处理。"
-                        "支持 .mp3 / .wav / .flac / .m4a / .mp4 等 ffmpeg 能读的格式",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": "small",
-                "enum": ["tiny", "base", "small", "medium", "large", "large-v3"],
-                "desc": "Whisper 模型规模。小模型快但质量差,large 系列质量最好但慢且占显存。"
-                        "首次使用会自动下载模型到本地缓存目录,后续复用",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda",
-                "enum": ["cuda", "cpu"],
-                "desc": "推理设备,默认 cuda;无显卡或显存不够填 cpu",
-            },
-            "language": {
-                "type": "string",
-                "required": False,
-                "default": None,
-                "enum": ["auto", "zh", "en", "ja", "ko", "fr", "de", "es", "ru",
-                         "it", "pt", "ar", "hi"],
-                "desc": "音频语种的 ISO 639-1 编码。不确定 / 用户没说就留空或填 auto,"
-                        "Whisper 会自己检测;明确给出能稍微提速并避免误判",
-            },
-            "task": {
-                "type": "string",
-                "required": False,
-                "default": "transcribe",
-                "enum": ["transcribe", "translate"],
-                "desc": "transcribe 保持原语言转写;translate 把任意语言翻译成英文文本输出",
-            },
-            "output_format": {
-                "type": "string",
-                "required": False,
-                "default": "all",
-                "enum": ["all", "txt", "srt", "vtt", "json"],
-                "desc": "输出格式;默认 all 同时产出 txt/srt/vtt/json/tsv",
-            },
-            "word_timestamps": {
-                "type": "boolean",
-                "required": False,
-                "default": False,
-                "desc": "是否输出逐词时间戳(更慢,但字幕/对齐场景需要)",
-            },
+            "input": {"type": "string | array", "required": True,
+                       "desc": "音频绝对路径,单文件或数组"},
+            "model": {"type": "string", "required": False, "default": "small",
+                       "enum": ["tiny", "base", "small", "medium", "large", "large-v3"]},
+            "device": {"type": "string", "required": False, "default": "cuda",
+                        "enum": ["cuda", "cpu"]},
+            "language": {"type": "string", "required": False, "default": None,
+                          "enum": ["auto", "zh", "en", "ja", "ko", "fr", "de", "es", "ru",
+                                    "it", "pt", "ar", "hi"],
+                          "desc": "ISO 639-1;留空/auto 让它自检"},
+            "task": {"type": "string", "required": False, "default": "transcribe",
+                      "enum": ["transcribe", "translate"],
+                      "desc": "translate=翻成英文"},
+            "output_format": {"type": "string", "required": False, "default": "all",
+                               "enum": ["all", "txt", "srt", "vtt", "json"]},
+            "word_timestamps": {"type": "boolean", "required": False, "default": False,
+                                 "desc": "逐词时间戳,字幕对齐场景开"},
         },
-        "returns": "成功时返回输出目录的绝对路径(其下含与输入同名的 .txt/.srt/.vtt/.json 等文件)",
+        "returns": "输出目录绝对路径(含 .txt/.srt/.vtt/.json 等)",
     },
     "rvc_convert": {
         "summary": (
-            "调用本地 RVC 做声色转换 —— 把输入音频里的人声换成目标说话人的音色。"
-            "输入若是带伴奏的整段音乐,RVC 会把伴奏也一起被音色化,效果差;"
-            "推荐先用 demucs_separate 抽出 vocals.wav 再喂给本工具,然后另行混回伴奏。"
-            "\n\n需要一份 RVC 模型权重 .pth;同名同目录的 .index 检索文件如果存在,"
-            "带上能显著降低发音失真,但找不到就省略,不要瞎指一个不匹配的 .index。"
-            "\n用户经常丢一个 RVC 模型包目录(里面通常有同名的 .pth + .index 一对),"
-            "请用 list_dir 探查找出这一对再调用;一次只能用一个角色的模型。"
-            "支持单文件或文件数组,会顺序处理并落到同一输出目录。"
+            "RVC 声色转换,把人声换成目标音色。"
+            "标准链: 先 demucs_separate 出 vocals.wav 再喂;整段带伴奏音乐效果很差。"
+            "\n.pth 必填;同名同目录的 .index 存在就带上降低失真,找不到省略,别指不匹配的。"
+            "用户丢模型包目录就 list_dir 找 .pth + .index 一对。支持单文件或数组。"
         ),
         "params": {
-            "input": {
-                "type": "string | array",
-                "required": True,
-                "desc": "待转换音频的本地绝对路径,可单字符串或字符串数组批量处理。"
-                        "强烈建议先经 demucs_separate 拿到 vocals.wav 再喂",
-            },
-            "model_path": {
-                "type": "string",
-                "required": True,
-                "desc": "RVC 模型权重 .pth 绝对路径;由用户提供,"
-                        "或从 list_dir 的结果里挑一份 .pth",
-            },
-            "index_path": {
-                "type": "string",
-                "required": False,
-                "default": None,
-                "desc": ".index 检索文件绝对路径,通常与 .pth 同名同目录。"
-                        "找不到就省略,worker 会自动跳过;不要瞎指不匹配的 .index",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda:0",
-                "enum": ["cuda:0", "cpu"],
-                "desc": "推理设备;无 GPU 或显存不足填 cpu(慢得多)",
-            },
-            "f0_method": {
-                "type": "string",
-                "required": False,
-                "default": "rmvpe",
-                "enum": ["rmvpe", "crepe", "harvest", "pm"],
-                "desc": "音高提取算法。rmvpe 综合最好,默认即可;"
-                        "唱歌 / 高音密集场景可试 crepe;pm 最快但抖",
-            },
-            "transpose": {
-                "type": "number",
-                "required": False,
-                "default": 0,
-                "desc": "变调半音(整数)。男声 -> 女声约 +12,女声 -> 男声约 -12;"
-                        "同性别一般保持 0",
-            },
-            "index_rate": {
-                "type": "number",
-                "required": False,
-                "default": 0.75,
-                "desc": "检索特征占比 0.0~1.0;越高越像参考音色,越低越保留输入的发音",
-            },
-            "format": {
-                "type": "string",
-                "required": False,
-                "default": "wav",
-                "enum": ["wav", "flac", "mp3"],
-                "desc": "输出格式",
-            },
+            "input": {"type": "string | array", "required": True,
+                       "desc": "音频绝对路径,单文件或数组"},
+            "model_path": {"type": "string", "required": True, "desc": "RVC .pth 绝对路径"},
+            "index_path": {"type": "string", "required": False, "default": None,
+                            "desc": ".index 检索文件绝对路径,没有就省略"},
+            "device": {"type": "string", "required": False, "default": "cuda:0",
+                        "enum": ["cuda:0", "cpu"]},
+            "f0_method": {"type": "string", "required": False, "default": "rmvpe",
+                           "enum": ["rmvpe", "crepe", "harvest", "pm"],
+                           "desc": "rmvpe 综合最好;crepe 适合唱歌;pm 最快但抖"},
+            "transpose": {"type": "number", "required": False, "default": 0,
+                           "desc": "变调半音;男->女 +12,女->男 -12"},
+            "index_rate": {"type": "number", "required": False, "default": 0.75,
+                            "desc": "0-1,越高越像参考音色"},
+            "format": {"type": "string", "required": False, "default": "wav",
+                        "enum": ["wav", "flac", "mp3"]},
         },
-        "returns": "成功时返回输出目录的绝对路径(其下每个输入对应一份 <name>_rvc.<format>)",
+        "returns": "输出目录绝对路径(每输入对应 <name>_rvc.<format>)",
     },
     "gptsovits_tts": {
         "summary": (
-            "调用本地 GPT-SoVITS 把任意文本合成成参考说话人音色的 wav。"
-            "需要 5 项必填:目标文本 / GPT 权重(.ckpt) / SoVITS 权重(.pth) / 参考音频(.wav) / 参考文本。"
-            "本工具不会读其它页面的状态,所有路径必须由你从对话上下文里自己定位。"
-            "\n\n用户经常直接丢一个数据集 / 素材目录(在消息里表现为 `--- 目录: ...` 附件)。"
-            "遇到这种情况,不要立刻调本工具,先按下面步骤探查再合成:"
-            "\n  1) 用 list_dir 列出目录,优先找 .list 文件 —— 这是 GPT-SoVITS 标准转写清单。"
-            "找到 .list 就用 read_file 打开它,每行 4 列以 `|` 分隔:"
-            "`音频路径|说话人|语言|文本`。任选其中一行,把音频路径当 ref_audio、文本当 ref_text;"
-            "音频路径常是相对路径,需要与 .list 所在目录拼成绝对路径。语言列(ZH/EN/JA/KO/YUE)"
-            "映射到 ref_language 的中文取值(中文/英文/日文/韩文/粤语)。"
-            "\n  2) 没 .list 时再翻别的:.ckpt 是 GPT 权重(gpt_model),.pth 是 SoVITS 权重(sovits_model),"
-            ".wav/.mp3/.flac 是参考音频候选,.txt 可能放对应转写。如果目录有 \"GPT_weights\" / \"SoVITS_weights\" "
-            "之类子目录,用 list_dir 带 recursive=true 再翻一层。"
-            "\n  3) 任何一项找不到 / 不能确定时,把候选列出来让用户挑或补,不要瞎选路径。"
+            "GPT-SoVITS 文本转参考音色 wav。必填 5 项: target_text / gpt_model(.ckpt) / sovits_model(.pth) / ref_audio(3-10s .wav) / ref_text。"
+            "\n用户丢数据集目录时先探查:"
+            "\n  1) list_dir 找 .list —— 每行 `音频|说话人|语言|文本` 以 | 分隔。"
+            "任选一行的音频当 ref_audio、文本当 ref_text;音频路径通常相对,和 .list 目录拼绝对路径。"
+            "语言列 ZH/EN/JA/KO/YUE 映射到 ref_language 的 中文/英文/日文/韩文/粤语"
+            "\n  2) 无 .list 时翻: .ckpt=gpt_model, .pth=sovits_model, .wav/.mp3/.flac=ref_audio 候选, .txt=转写候选。"
+            "有 GPT_weights/SoVITS_weights 子目录用 recursive=true"
+            "\n  3) 任一项找不到就把候选列出让用户挑,别瞎猜"
         ),
         "params": {
-            "target_text": {
-                "type": "string",
-                "required": True,
-                "desc": "要合成的目标文本;支持多句,长文走 how_to_cut 切分",
-            },
-            "gpt_model": {
-                "type": "string",
-                "required": True,
-                "desc": "GPT 权重 .ckpt 绝对路径;用户直接给 / 或从 list_dir 的结果里挑一份 .ckpt",
-            },
-            "sovits_model": {
-                "type": "string",
-                "required": True,
-                "desc": "SoVITS 权重 .pth 绝对路径;用户直接给 / 或从 list_dir 的结果里挑一份 .pth",
-            },
-            "ref_audio": {
-                "type": "string",
-                "required": True,
-                "desc": "主参考音频(3~10s)绝对路径;用户直接给 / 或从 .list 抽一行,"
-                        "把其中的音频路径与 .list 所在目录拼成绝对路径",
-            },
-            "ref_text": {
-                "type": "string",
-                "required": True,
-                "desc": "参考音频对应的转写文本;用户直接给 / 或从 .list 同一行的文本列取得",
-            },
-            "target_language": {
-                "type": "string",
-                "required": False,
-                "default": "中文",
-                "enum": _SOVITS_LANGS,
-                "desc": "目标语种(必须用列出的中文字面值,inference_webui 内部以此查表)",
-            },
-            "ref_language": {
-                "type": "string",
-                "required": False,
-                "default": "中文",
-                "enum": _SOVITS_LANGS,
-                "desc": "参考音频语种(同 target_language 的取值规则)",
-            },
-            "how_to_cut": {
-                "type": "string",
-                "required": False,
-                "default": "凑四句一切",
-                "enum": _SOVITS_CUTS,
-                "desc": "长文本切分策略",
-            },
-            "speed": {
-                "type": "number",
-                "required": False,
-                "default": 1.0,
-                "desc": "语速 0.5~2.0",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda:0",
-                "enum": ["cuda:0", "cpu"],
-                "desc": "推理设备;无 GPU 或显存不足时填 cpu",
-            },
+            "target_text": {"type": "string", "required": True,
+                             "desc": "合成文本;长文走 how_to_cut 切分"},
+            "gpt_model": {"type": "string", "required": True, "desc": "GPT .ckpt 绝对路径"},
+            "sovits_model": {"type": "string", "required": True, "desc": "SoVITS .pth 绝对路径"},
+            "ref_audio": {"type": "string", "required": True, "desc": "3-10s 参考 wav 绝对路径"},
+            "ref_text": {"type": "string", "required": True, "desc": "参考音频对应转写文本"},
+            "target_language": {"type": "string", "required": False, "default": "中文",
+                                 "enum": _SOVITS_LANGS,
+                                 "desc": "必须用中文字面值(内部查表)"},
+            "ref_language": {"type": "string", "required": False, "default": "中文",
+                              "enum": _SOVITS_LANGS},
+            "how_to_cut": {"type": "string", "required": False, "default": "凑四句一切",
+                            "enum": _SOVITS_CUTS},
+            "speed": {"type": "number", "required": False, "default": 1.0, "desc": "0.5-2.0"},
+            "device": {"type": "string", "required": False, "default": "cuda:0",
+                        "enum": ["cuda:0", "cpu"]},
         },
-        "returns": "成功时返回合成 wav 的绝对路径,聊天里会自动出现可播放的输出卡片",
+        "returns": "合成 wav 绝对路径",
     },
     "yolo_detect": {
         "summary": (
-            "调用本地 YOLO(v8 / v11) 在图片上做目标检测。"
-            "支持单张、整个目录、路径数组 —— 目录会展开成里面所有图片一次跑完。"
-            "\n模型选型(按 enum 取):n 最快但精度低,适合预览;s/m 是常用平衡档;"
-            "l/x 高精度但慢且占显存。v11 比 v8 同档稍精且略慢,首选 yolov8m / yolo11m。"
-            "\n首次使用某个模型会自动从 ultralytics GitHub 下载权重到本地缓存,后续复用。"
-            "\n返回:标注图(画了框)落到 outputs/yolo/llm_<时间戳>/,聊天里会列出文件;"
-            "结构化的检测框 / 类别 / 置信度同时按 save_mode 落 TXT 或 JSON 旁路保存。"
+            "YOLO(v8/v11) 目标检测,画标注框 + 结构化输出。"
+            "**用户明确要检测框/YOLO/COCO 标注才调**;单纯问'图里是什么'该用视觉直接看。"
+            "input 支持单张/目录/数组;v11 同档比 v8 稍精略慢,默认 yolov8m。"
         ),
         "params": {
-            "input": {
-                "type": "string | array",
-                "required": True,
-                "desc": "待检测的本地图像绝对路径(.png/.jpg/.jpeg/.webp/.bmp),"
-                        "或一个含图像的目录,或字符串数组批量处理",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": "yolov8m.pt",
-                "enum": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
-                         "yolov8l.pt", "yolov8x.pt",
-                         "yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
-                         "yolo11l.pt", "yolo11x.pt"],
-                "desc": "权重文件名(含 .pt 后缀)。从 enum 挑;别凭历史名字猜",
-            },
-            "conf": {
-                "type": "number",
-                "required": False,
-                "default": 0.25,
-                "desc": "置信度阈值 0~1,低于该分数的框丢弃。默认 0.25;"
-                        "想多召回降到 0.15,想少误检升到 0.4",
-            },
-            "iou": {
-                "type": "number",
-                "required": False,
-                "default": 0.45,
-                "desc": "NMS 的 IoU 阈值 0~1,越低越激进合并重叠框",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "auto",
-                "enum": ["auto", "cuda", "cpu"],
-                "desc": "推理设备。auto=有显卡选 cuda,否则 cpu;显存爆了改 cpu",
-            },
-            "classes": {
-                "type": "array",
-                "required": False,
-                "default": None,
-                "desc": "只保留这些 COCO 类别 id(0-79)的检测结果;留空=全部类别。"
-                        "常用:[0]=person,[2]=car,[16]=dog,[17]=cat",
-            },
-            "save_mode": {
-                "type": "string",
-                "required": False,
-                "default": "图片+TXT(YOLO)",
-                "enum": ["图片+TXT(YOLO)", "图片+JSON(COCO)", "仅图片", "不保存"],
-                "desc": "落盘策略。TXT 是 YOLO 格式(每行 class cx cy w h),"
-                        "JSON 是 COCO 格式带 bbox/score",
-            },
+            "input": {"type": "string | array", "required": True,
+                       "desc": "图像绝对路径 / 目录 / 数组"},
+            "model": {"type": "string", "required": False, "default": "yolov8m.pt",
+                       "enum": ["yolov8n.pt", "yolov8s.pt", "yolov8m.pt",
+                                "yolov8l.pt", "yolov8x.pt",
+                                "yolo11n.pt", "yolo11s.pt", "yolo11m.pt",
+                                "yolo11l.pt", "yolo11x.pt"]},
+            "conf": {"type": "number", "required": False, "default": 0.25,
+                      "desc": "置信度阈值 0-1"},
+            "iou": {"type": "number", "required": False, "default": 0.45,
+                     "desc": "NMS IoU 阈值"},
+            "device": {"type": "string", "required": False, "default": "auto",
+                        "enum": ["auto", "cuda", "cpu"]},
+            "classes": {"type": "array", "required": False, "default": None,
+                         "desc": "COCO 类别 id 数组;常用 0=person 2=car 16=dog 17=cat;留空全类"},
+            "save_mode": {"type": "string", "required": False, "default": "图片+TXT(YOLO)",
+                           "enum": ["图片+TXT(YOLO)", "图片+JSON(COCO)", "仅图片", "不保存"]},
         },
-        "returns": (
-            "成功时返回任务输出目录绝对路径(outputs/yolo/llm_<时间戳>/),"
-            "其下含全部标注图与对应 TXT/JSON;聊天里会自动列出文件"
-        ),
+        "returns": "任务输出目录 outputs/yolo/llm_<ts>/ (含标注图 + TXT/JSON)",
     },
     "musicgen_compose": {
         "summary": (
-            "调用本地 MusicGen 用文字描述生成一段音乐(WAV/MP3)。"
-            "支持单条 prompt,也支持字符串数组并行出多个版本。"
-            "\n模型选型(按 enum):small 最快但糙(8s 片段 GPU 约 5~10s);"
-            "medium 是常用平衡档;large 质量最好但慢且吃显存(>10GB);"
-            "melody 是变体,可以传 melody 参数指定一段参考旋律做风格迁移。"
-            "\n时长 1~30 秒,常用 8~15 秒。GPU 强烈推荐,CPU 上几乎跑不动。"
-            "\n⚠ prompt 用英文效果远好于中文,例如 'cinematic orchestral, "
-            "90s anime opening, energetic and bright'。"
-            "\n首次使用某规模会自动下载到 data/models/audiocraft。"
+            "MusicGen 文字生成音乐(wav/mp3),单/多 prompt 并行。"
+            "small 快糙 / medium 平衡 / large 好慢占显存 / melody 支持旋律参考。"
+            "时长 1-30s 常用 8-15s。⚠ prompt 英文效果远好于中文, 如 'cinematic orchestral, 90s anime opening'。"
         ),
         "params": {
-            "prompts": {
-                "type": "string | array",
-                "required": True,
-                "desc": "音乐风格 / 情绪描述,英文为主。可传单字符串,"
-                        "也可传字符串数组并行出多个版本",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": "small",
-                "enum": ["small", "medium", "large", "melody"],
-                "desc": "MusicGen 规模。small ~1GB / medium ~3GB / large ~6GB / "
-                        "melody 接受 melody 参考音频;按用户对质量与速度的要求选",
-            },
-            "duration": {
-                "type": "number",
-                "required": False,
-                "default": 10,
-                "desc": "时长(秒),范围 1~30。默认 10s;时长越长越占显存,"
-                        "large 在 30s 时容易爆显存",
-            },
-            "melody": {
-                "type": "string",
-                "required": False,
-                "default": None,
-                "desc": "可选,旋律参考音频本地绝对路径(.wav/.mp3);"
-                        "只在 model=\"melody\" 时生效,其它模型会忽略",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda",
-                "enum": ["cuda", "cuda:0", "cuda:1", "cpu"],
-                "desc": "推理设备。强烈推荐 cuda;cpu 上 small 也要分钟级",
-            },
-            "temperature": {
-                "type": "number",
-                "required": False,
-                "default": 1.0,
-                "desc": "采样温度。越高越发散,通常 0.8~1.2",
-            },
-            "top_k": {
-                "type": "number",
-                "required": False,
-                "default": 250,
-                "desc": "top-k 采样。一般保持默认 250",
-            },
-            "cfg_coef": {
-                "type": "number",
-                "required": False,
-                "default": 3.0,
-                "desc": "classifier-free guidance 系数。越高越贴 prompt 但音质可能下降",
-            },
-            "output_format": {
-                "type": "string",
-                "required": False,
-                "default": "wav",
-                "enum": ["wav", "mp3"],
-                "desc": "落盘格式,wav 无损 / mp3 占空间小",
-            },
+            "prompts": {"type": "string | array", "required": True,
+                         "desc": "音乐描述,英文为主"},
+            "model": {"type": "string", "required": False, "default": "small",
+                       "enum": ["small", "medium", "large", "melody"]},
+            "duration": {"type": "number", "required": False, "default": 10,
+                          "desc": "秒,1-30"},
+            "melody": {"type": "string", "required": False, "default": None,
+                        "desc": "旋律参考音频路径,仅 model=melody 生效"},
+            "device": {"type": "string", "required": False, "default": "cuda",
+                        "enum": ["cuda", "cuda:0", "cuda:1", "cpu"]},
+            "temperature": {"type": "number", "required": False, "default": 1.0,
+                             "desc": "0.8-1.2"},
+            "top_k": {"type": "number", "required": False, "default": 250},
+            "cfg_coef": {"type": "number", "required": False, "default": 3.0},
+            "output_format": {"type": "string", "required": False, "default": "wav",
+                               "enum": ["wav", "mp3"]},
         },
-        "returns": (
-            "成功时返回任务输出目录绝对路径(outputs/audiocraft/llm_<时间戳>/),"
-            "其下含 musicgen_<时间戳>_NN.wav/.mp3;聊天里会自动列出可播放的音频卡片"
-        ),
+        "returns": "任务输出目录 outputs/audiocraft/llm_<ts>/ (含 musicgen_<ts>_NN.wav/mp3)",
     },
     "audiogen_create": {
         "summary": (
-            "调用本地 AudioGen 用文字描述生成环境声 / 音效片段(WAV/MP3),不是音乐。"
-            "适合下雨声、键盘敲击、街道喧闹、玻璃破碎这类 sound design 场景。"
-            "\n模型当前只发了 medium 一档(~1.5GB),GPU 必备。"
-            "\n时长 1~30 秒,常用 5~10 秒;prompt 用英文效果好于中文。"
-            "\n⚠ 想要音乐请用 musicgen_compose;AudioGen 不会生成有调旋律。"
+            "AudioGen 文字生成音效/环境声(不是音乐)。适合下雨、键盘、街道、玻璃破碎这类 sound design。"
+            "只有 medium 一档;时长 1-30s 常用 5-10s,prompt 用英文。想要有调音乐用 musicgen_compose。"
         ),
         "params": {
-            "prompts": {
-                "type": "string | array",
-                "required": True,
-                "desc": "音效描述,英文为主。可传单字符串,"
-                        "也可传字符串数组并行出多个版本。"
-                        "例如 'heavy rain on roof, distant thunder'",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": "medium",
-                "enum": ["medium"],
-                "desc": "AudioGen 规模。当前 facebook 只发了 medium",
-            },
-            "duration": {
-                "type": "number",
-                "required": False,
-                "default": 8,
-                "desc": "时长(秒),范围 1~30。默认 8s",
-            },
-            "device": {
-                "type": "string",
-                "required": False,
-                "default": "cuda",
-                "enum": ["cuda", "cuda:0", "cuda:1", "cpu"],
-                "desc": "推理设备。强烈推荐 cuda",
-            },
-            "temperature": {
-                "type": "number",
-                "required": False,
-                "default": 1.0,
-                "desc": "采样温度,越高越发散",
-            },
-            "top_k": {
-                "type": "number",
-                "required": False,
-                "default": 250,
-                "desc": "top-k 采样,保持默认 250 即可",
-            },
-            "cfg_coef": {
-                "type": "number",
-                "required": False,
-                "default": 3.0,
-                "desc": "classifier-free guidance 系数",
-            },
-            "output_format": {
-                "type": "string",
-                "required": False,
-                "default": "wav",
-                "enum": ["wav", "mp3"],
-                "desc": "落盘格式",
-            },
+            "prompts": {"type": "string | array", "required": True,
+                         "desc": "音效描述,英文为主, 如 'heavy rain on roof'"},
+            "model": {"type": "string", "required": False, "default": "medium",
+                       "enum": ["medium"]},
+            "duration": {"type": "number", "required": False, "default": 8,
+                          "desc": "秒,1-30"},
+            "device": {"type": "string", "required": False, "default": "cuda",
+                        "enum": ["cuda", "cuda:0", "cuda:1", "cpu"]},
+            "temperature": {"type": "number", "required": False, "default": 1.0},
+            "top_k": {"type": "number", "required": False, "default": 250},
+            "cfg_coef": {"type": "number", "required": False, "default": 3.0},
+            "output_format": {"type": "string", "required": False, "default": "wav",
+                               "enum": ["wav", "mp3"]},
         },
-        "returns": (
-            "成功时返回任务输出目录绝对路径(outputs/audiocraft/llm_<时间戳>/),"
-            "其下含 audiogen_<时间戳>_NN.wav/.mp3;聊天里会自动列出可播放的音频卡片"
-        ),
+        "returns": "任务输出目录 outputs/audiocraft/llm_<ts>/ (含 audiogen_<ts>_NN.wav/mp3)",
     },
     "realesrgan_upscale": {
         "summary": (
-            "调用本地 Real-ESRGAN (ncnn-vulkan) 对图片做超分放大。"
-            "支持三种输入形态:单张图、整个目录、路径数组 —— 目录会把里面所有图片一次跑完。"
-            "\n选型(按 model enum 中实际命中):含 'plus' 不含 'anime' 是通用真实照片;"
-            "含 'plus' 且 'anime' 是动漫/插画;含 'animevideo' 是动漫视频帧(唯一支持 2/3 倍,"
-            "其它模型都只能 4 倍);含 'generalv3' 是通用 v3 增强。"
-            "\n显存不够会爆 vk_create_image 失败,这种时候 tile 选 256/512 切片处理。"
-            "\n⚠ model 参数必须从下面 enum 里挑;别凭历史名字猜(如 realesrgan-x4plus 已被改名)。"
+            "Real-ESRGAN(ncnn-vulkan) 图像超分放大。**用户明确要放大/超分才调**,'看看图里是啥'不该动这个。"
+            "\ninput 支持单张/目录/数组。选型(按 model enum 实际命中):"
+            "含 plus 不含 anime = 通用真实照; 含 plus + anime = 动漫/插画;"
+            " 含 animevideo = 动漫视频帧(唯一支持 2/3 倍)。显存不足设 tile=256/512。"
         ),
         "params": {
-            "input": {
-                "type": "string | array",
-                "required": True,
-                "desc": "待放大的本地图像绝对路径(.png/.jpg/.webp),"
-                        "或一个含图像的目录,或字符串数组批量处理。"
-                        "目录里非图像文件会被 exe 自行跳过",
-            },
-            "model": {
-                "type": "string",
-                "required": False,
-                "default": _REALESRGAN_DEFAULT_MODEL,
-                "enum": _REALESRGAN_MODELS,
-                "desc": "模型名 —— 必须从 enum 取值,这是当前安装实际存在的模型。"
-                        "按命名特征选: 真实照片选含 'plus' 不含 'anime' 的; "
-                        "动漫/插画选含 'plus' 和 'anime' 的; "
-                        "动漫视频帧选含 'animevideo' 的(也只有它支持 2/3 倍)",
-            },
-            "scale": {
-                "type": "number",
-                "required": False,
-                "default": 4,
-                "enum": [2, 3, 4],
-                "desc": "放大倍数。除 animevideo 系列外的模型都只支持 4;"
-                        "选 2/3 时必须搭配含 'animevideo' 的模型",
-            },
-            "tile": {
-                "type": "number",
-                "required": False,
-                "default": 0,
-                "desc": "图块大小,0=自动整图处理。显存不足时设 256 或 512 切片,"
-                        "越小越省显存但越慢",
-            },
-            "gpu_id": {
-                "type": "string",
-                "required": False,
-                "default": "auto",
-                "desc": "GPU 编号字符串。\"auto\"=第一块可用 GPU(默认),"
-                        "\"0\"/\"1\"=指定显卡,\"-1\"=CPU(慢 10 倍以上)",
-            },
-            "fmt": {
-                "type": "string",
-                "required": False,
-                "default": "png",
-                "enum": ["png", "jpg", "webp"],
-                "desc": "输出格式,默认 png 无损;批量怕占盘可改 jpg/webp",
-            },
-            "tta": {
-                "type": "boolean",
-                "required": False,
-                "default": False,
-                "desc": "TTA 测试时增强,质量略升但速度变 8 倍慢,默认关",
-            },
+            "input": {"type": "string | array", "required": True,
+                       "desc": "图像绝对路径 / 目录 / 数组"},
+            "model": {"type": "string", "required": False,
+                       "default": _REALESRGAN_DEFAULT_MODEL,
+                       "enum": _REALESRGAN_MODELS,
+                       "desc": "必须从 enum 取,别凭旧命名猜"},
+            "scale": {"type": "number", "required": False, "default": 4,
+                       "enum": [2, 3, 4],
+                       "desc": "2/3 只有 animevideo 系列支持"},
+            "tile": {"type": "number", "required": False, "default": 0,
+                      "desc": "0=整图;显存不足设 256/512"},
+            "gpu_id": {"type": "string", "required": False, "default": "auto",
+                        "desc": "auto/0/1/-1(-1=CPU)"},
+            "fmt": {"type": "string", "required": False, "default": "png",
+                     "enum": ["png", "jpg", "webp"]},
+            "tta": {"type": "boolean", "required": False, "default": False,
+                     "desc": "TTA 质量略升 8× 慢"},
         },
-        "returns": (
-            "成功时返回输出路径:单文件输入返回单张超分图绝对路径"
-            "(如 outputs/realesrgan/<stem>_x4.png);目录或数组输入返回 outputs/realesrgan/ 目录,"
-            "其下含全部输出图;聊天里会自动列出文件列表"
-        ),
+        "returns": "单文件输入返回单图绝对路径 outputs/realesrgan/<stem>_x4.png;目录/数组返回 outputs/realesrgan/",
     },
     "search_song": {
         "summary": (
-            "在网易云音乐或 B 站搜索歌曲 / 视频,返回候选列表(不下载)。"
-            "用来给用户一份带歌名 / 歌手 / 时长的命中,再让用户决定下哪首,"
-            "或者直接挑第一条调 download_song。"
-            "用户已经明确点名某首歌(\"帮我下 xxx\")时优先用 fetch_song 一步到位,省一轮往返。"
+            "网易云/B 站搜歌返回候选(不下载)。用户已明确点名歌名的用 fetch_song 一步到位省一轮。"
         ),
         "params": {
-            "keyword": {
-                "type": "string",
-                "required": True,
-                "desc": "搜索关键词,例如 \"周杰伦 稻香\" / \"原神 见龙\"",
-            },
-            "source": {
-                "type": "string",
-                "required": False,
-                "default": "netease",
-                "enum": ["netease", "bilibili"],
-                "desc": "数据源。netease=网易云音乐(纯音轨,质量最好);"
-                        "bilibili=B 站视频(取音频流);默认 netease",
-            },
-            "limit": {
-                "type": "number",
-                "required": False,
-                "default": 10,
-                "desc": "返回条数,1~30,默认 10",
-            },
-            "drop_instrumental": {
-                "type": "boolean",
-                "required": False,
-                "default": True,
-                "desc": "是否过滤纯伴奏 / instrumental / 卡拉版(仅对 netease 生效)",
-            },
+            "keyword": {"type": "string", "required": True,
+                         "desc": "关键词,如 '周杰伦 稻香'"},
+            "source": {"type": "string", "required": False, "default": "netease",
+                        "enum": ["netease", "bilibili"],
+                        "desc": "netease=纯音轨最好;bilibili=B 站音频流"},
+            "limit": {"type": "number", "required": False, "default": 10,
+                       "desc": "1-30"},
+            "drop_instrumental": {"type": "boolean", "required": False, "default": True,
+                                    "desc": "过滤伴奏,仅 netease 生效"},
         },
         "returns": (
-            "JSON 字符串:{source, keyword, count, hits:[...]}。"
-            "hits 内每条:netease 是 {id, name, artists, album, duration_ms, source},"
-            "bilibili 是 {bvid, title, author, duration, pic, play, source}。"
-            "下一步调 download_song 时,source 原样传,id 用 netease 的 `id` 或 bilibili 的 `bvid`。"
+            "JSON: {source, keyword, count, hits:[...]}。"
+            "netease 每条 {id, name, artists, album, duration_ms, source};"
+            "bilibili {bvid, title, author, duration, pic, play, source}。"
+            "下一步 download_song: source 原样传, id 用 netease 的 id 或 bilibili 的 bvid"
         ),
     },
     "download_song": {
         "summary": (
-            "按 source + id 下载具体一首歌 / 一个 B 站视频的音频流。"
-            "id 必须来自上一轮 search_song 的命中,不要自己编。"
-            "下载完成后聊天里会出现可播放的音频卡片。"
-            "下到本地的音频可以直接传给 demucs_separate / whisper_transcribe / rvc_convert 等下游工具继续加工。"
+            "按 source+id 下载一首;id 必须来自 search_song 命中,别瞎编。"
+            "下完可直接给 demucs/whisper/rvc 继续加工。"
         ),
         "params": {
-            "source": {
-                "type": "string",
-                "required": True,
-                "enum": ["netease", "bilibili"],
-                "desc": "数据源,与 search_song 的 source 一致",
-            },
-            "id": {
-                "type": "string | number",
-                "required": True,
-                "desc": "歌曲 / 视频标识。"
-                        "netease 传 song_id(整数或可转 int 的字符串);"
-                        "bilibili 传 bvid 字符串(形如 \"BV1xxx\")。"
-                        "都从 search_song 的 hits 里取",
-            },
-            "title": {
-                "type": "string",
-                "required": False,
-                "default": None,
-                "desc": "落盘文件名(不含扩展名),通常拼成 \"歌名 - 歌手\"。"
-                        "省略时用 source 自带默认名,可能不可读",
-            },
+            "source": {"type": "string", "required": True,
+                        "enum": ["netease", "bilibili"]},
+            "id": {"type": "string | number", "required": True,
+                    "desc": "netease=song_id;bilibili=bvid(BV1xxx)"},
+            "title": {"type": "string", "required": False, "default": None,
+                       "desc": "落盘文件名,常用 '歌名 - 歌手'"},
         },
-        "returns": "成功时返回下载后的本地绝对路径(.mp3/.flac/.m4a 等)",
+        "returns": "下载后的本地绝对路径(.mp3/.flac/.m4a 等)",
     },
     "fetch_song": {
         "summary": (
-            "一键搜索并下载第一个非伴奏匹配项 —— 搜 + 取首条 + 下,合并 search_song + download_song 的常见用法。"
-            "适合用户随口说 \"帮我下个 xxx 的歌\" 这种,不需要给候选让用户挑的场景。"
-            "如果用户对结果挑剔,改用 search_song 显示候选,让用户点名再 download_song。"
+            "一键搜+取首条非伴奏+下,合并 search+download。"
+            "用户挑剔场景改用 search_song 让用户选。"
         ),
         "params": {
-            "keyword": {
-                "type": "string",
-                "required": True,
-                "desc": "搜索关键词,通常 \"歌名 歌手\" 命中率最高",
-            },
-            "source": {
-                "type": "string",
-                "required": False,
-                "default": "netease",
-                "enum": ["netease", "bilibili"],
-                "desc": "数据源,默认 netease",
-            },
-            "drop_instrumental": {
-                "type": "boolean",
-                "required": False,
-                "default": True,
-                "desc": "是否过滤伴奏(仅对 netease 生效)",
-            },
+            "keyword": {"type": "string", "required": True,
+                         "desc": "关键词,'歌名 歌手' 命中率高"},
+            "source": {"type": "string", "required": False, "default": "netease",
+                        "enum": ["netease", "bilibili"]},
+            "drop_instrumental": {"type": "boolean", "required": False, "default": True,
+                                    "desc": "仅 netease 生效"},
         },
-        "returns": "成功时返回下载后的本地绝对路径,聊天里会出现可播放的音频卡片",
+        "returns": "下载后的本地绝对路径",
     },
 }
 
 
 def _format_tool_spec(name: str, spec: dict) -> str:
-    lines = [f"#### `{name}`", spec["summary"], "", "参数："]
-    for pname, p in spec["params"].items():
-        req = "必填" if p.get("required") else "可选"
-        default = ""
-        if not p.get("required"):
-            dv = p.get("default")
-            default = f"，默认 `{json.dumps(dv, ensure_ascii=False)}`"
-        enum = ""
-        if p.get("enum"):
-            enum = "，取值 " + " / ".join(f"`{v}`" for v in p["enum"])
-        lines.append(
-            f"- `{pname}` ({p['type']}, {req}{default}{enum})：{p['desc']}")
-    lines.append("")
-    lines.append(f"返回：{spec['returns']}")
+    """把一条工具规格渲染到 prompt。
+    空 desc 自动省掉尾巴,空 params/returns 也跳过对应段 —— 让极简写法直接省 tokens。
+    """
+    lines = [f"#### `{name}`", spec["summary"]]
+    params = spec.get("params") or {}
+    if params:
+        lines.append("参数:")
+        for pname, p in params.items():
+            req = "必填" if p.get("required") else "可选"
+            bits = [p["type"], req]
+            if not p.get("required"):
+                dv = p.get("default")
+                bits.append(f"默认 `{json.dumps(dv, ensure_ascii=False)}`")
+            if p.get("enum"):
+                bits.append("取值 " + "/".join(f"`{v}`" for v in p["enum"]))
+            head = f"- `{pname}` ({', '.join(bits)})"
+            desc = p.get("desc") or ""
+            lines.append(f"{head}: {desc}" if desc else head)
+    if spec.get("returns"):
+        lines.append(f"返回: {spec['returns']}")
     return "\n".join(lines)
 
 
-# 用 __TOOLS__ 占位避免与 JSON 的花括号冲突，不走 .format()
+# 用 __TOOL_DIRECTORY__ 占位避免与 JSON 的花括号冲突,不走 .format()。
+# 注意:系统提示词里只放"工具名录 + 一句话简介",完整 spec 由模型通过元工具
+# `get_tool_spec` 按需拉。这样冷启动 prompt 更瘦,单次不用的工具规格永远不进 payload。
 _TOOL_PROTOCOL_TEMPLATE = """
 
-## 可用工具（MCP 风格）
+## 工具调用 (MCP 风格)
+实际操作(分离/转录/生成/超分/下载 等)用工具跑,别凭空给"结果"。
 
-涉及本地 AI 工具的实际操作（例如分离音频）通过工具调用真实执行，不要凭空给出"结果"。
-工具会在用户机器上真跑，注意耗时（Demucs 单首歌通常 1-3 分钟）。
+### 协议
+回复里嵌入 `<tool_call>{"name":"...","arguments":{...}}</tool_call>` (合法 JSON):
+- 一次回复可多个 tool_call,按序执行
+- 标签外普通文字展示给用户
+- 系统回填 `<tool_result name="..." status="ok|error">...</tool_result>`;拿到结果后用普通文字答复,别再瞎发 tool_call
+- 别伪造 tool_result;参数不确定就先用文字问用户
 
-### 调用协议
-在你的回复里嵌入下面的标签，标签内只能写合法 JSON：
+### 元工具 get_tool_spec (按需拉规格)
+下面「可用工具目录」只有名录 + 一句话简介,**没给你参数表**。要用某个工具前先调 `get_tool_spec` 拿完整规格(参数/enum/默认值/返回),再照规格发正式 tool_call。
+用法(一次可拉多个,规划工作链时推荐一次拉齐,省来回):
+<tool_call>{"name":"get_tool_spec","arguments":{"names":["demucs_separate","rvc_convert"]}}</tool_call>
+- 本轮回复里**只发 get_tool_spec,不要同时跟真正的工具调用** —— spec 要等下一轮 tool_result 回来才在上下文里。
+- 收到 spec 后**下一轮**照着发正式 tool_call,参数照 spec 抄,别自己编。
+- 同一会话里 spec 落在 history 里可复用,别重复拉同一个。
 
-<tool_call>
-{"name": "工具名", "arguments": {"参数名": "参数值"}}
-</tool_call>
+### 附件形态
+- `--- 文件: name (bytes) ---` + `路径: <abs>` + 代码块内容(已内联)
+- `--- 附件: name (...) [未内联] ---` + `路径: <abs>` (二进制/大文件,只有路径)
+- `--- 目录: name ---` + `路径: <abs>` (先 list_dir 探查;.list 等文本再 read_file)
+- `--- 图片: name ---` + `路径: <abs>` (视觉模型能直接看图,默认直接答,除非明确要检测框/超分)
 
-- 一次回复可以含多个 `<tool_call>`，会按出现顺序串行执行。
-- 标签外的普通文字会展示给用户，可以用来说明你要做什么。
-- 工具跑完后系统会再调你一次，并把每个结果以
-  `<tool_result name="..." status="ok|error">...</tool_result>` 注入上下文；
-  收到结果后用普通文字给用户最终答复，不要再发 `<tool_call>` 除非确实需要新工具。
-- 不要伪造 `<tool_result>`，那只能由系统注入。
-- 参数缺失或不确定时，不要瞎填；先用普通文字向用户问清楚再调用。
+`路径:` 是绝对路径,调工具时直接用,别再问用户要一遍。
 
-### 附件路径
-用户上传的附件会在消息里以下面三种形式之一出现：
-- 文本附件： `--- 文件: name (... bytes) ---` 后跟 `路径: <绝对路径>` 与代码块内容
-- 二进制 / 大文件附件： `--- 附件: name (...) [二进制或过大，未内联] ---` 后跟 `路径: <绝对路径>`
-- 目录附件： `--- 目录: name ---` 后跟 `路径: <绝对路径>`
-其中的 `路径:` 字段就是文件 / 目录在用户机器上的本地绝对路径，
-可以直接作为工具调用的文件参数（例如 `demucs_separate` 的 `input`、`list_dir` 的 `path`），
-不要再向用户索要一次路径。
-
-收到目录附件时不要直接回答里面有什么 —— 先用 `list_dir` 探查内容，
-对疑似转写清单 / 配置 / 描述这类文本文件再用 `read_file` 看具体内容
-（例如 GPT-SoVITS 数据集里的 `.list`），然后才能据此调用下游工具。
-
-### 工具列表
-
-__TOOLS__
+### 可用工具目录
+__TOOL_DIRECTORY__
 
 ### 示例
-
-用户：帮我提取 D:/music/song.mp3 里的人声
-助手：
-我用 Demucs 跑一下，只分两轨更快。
-<tool_call>
-{"name": "demucs_separate", "arguments": {"input": "D:/music/song.mp3", "two_stems": "vocals"}}
-</tool_call>
+用户: 帮我提取 D:/music/song.mp3 的人声
+助手:
+先拉 demucs 规格。
+<tool_call>{"name":"get_tool_spec","arguments":{"names":["demucs_separate"]}}</tool_call>
 """
 
 
-def _build_tool_prompt() -> str:
-    blocks = "\n\n".join(
-        _format_tool_spec(n, s) for n, s in TOOL_REGISTRY.items()
+# 从 summary 里抽第一句话作为目录里的一句话简介。
+# 顺序: 优先切句号 / 分号 / 换行 —— 与压缩后的 summary 撰写习惯匹配,
+# 都是"XX 工具做 XX。(细节…)"的结构。
+_BRIEF_SPLIT_RE = re.compile(r"[。;\n]")
+
+
+def _tool_brief(spec: dict) -> str:
+    """从 spec['summary'] 里挑第一小节当"目录级"简介,截到 60 字符内。"""
+    summary = (spec.get("summary") or "").strip()
+    if not summary:
+        return ""
+    head = _BRIEF_SPLIT_RE.split(summary, maxsplit=1)[0].strip()
+    if len(head) > 60:
+        head = head[:60] + "…"
+    return head
+
+
+def _build_tool_directory() -> str:
+    return "\n".join(
+        f"- `{n}` — {_tool_brief(s)}"
+        for n, s in TOOL_REGISTRY.items()
     )
-    return _TOOL_PROTOCOL_TEMPLATE.replace("__TOOLS__", blocks)
+
+
+def _build_tool_prompt() -> str:
+    return _TOOL_PROTOCOL_TEMPLATE.replace(
+        "__TOOL_DIRECTORY__", _build_tool_directory()
+    )
 
 
 SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + _build_tool_prompt()
@@ -1148,6 +744,73 @@ TEXT_EXTS = {
 }
 MAX_FILE_BYTES = 256 * 1024
 
+# ---- 视觉输入 -------------------------------------------------------------
+# 只把 IMAGE_INLINE_EXTS 里的图片走原生多模态 (image_url data URL);
+# 音频 / 视频 / 二进制一律不内联 —— 走原来的"路径 + 工具调用链"路径,
+# 让模型用 whisper_transcribe / demucs_separate / yolo_detect 等本地工具处理。
+IMAGE_INLINE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+# 图片单张上限 6 MB。base64 后大约会撑到 ~8 MB,超过它多数网关会 413/太大;
+# 真要极致画质推 Real-ESRGAN 就够了,视觉理解不需要原始分辨率。
+MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+# 模型 id -> 是否具备图像理解 (chat completions vision) 的启发式匹配。
+# OpenAI /v1/models 协议没有 capabilities 字段,只能按命名规律拍。
+# 用户可在 configs/config.json.llm_chat.vision_models 手动追加,
+# 精确匹配优先级最高;这里的正则只是缺省矩阵。
+_VISION_MODEL_PATTERNS = [
+    # OpenAI —— 4o 系全部,4-turbo 与 4-vision-preview,以及 o 系推理模型
+    r"^gpt-4o", r"^chatgpt-4o", r"^gpt-4-turbo", r"^gpt-4.*vision",
+    r"^gpt-4\.\d", r"^gpt-5",
+    r"^o1(\b|[-_])", r"^o3(\b|[-_])", r"^o4(\b|[-_])",
+    # Anthropic Claude 3 及以上全部支持视觉
+    r"claude-3", r"claude-4", r"claude-opus", r"claude-sonnet", r"claude-haiku",
+    # Google Gemini 1.5+ 与 2 系全部支持
+    r"gemini-1\.5", r"gemini-2", r"gemini-pro-vision", r"gemini-exp",
+    # 阿里 Qwen-VL 系列
+    r"qwen.*vl", r"qwen2.*vl", r"qwen2\.5.*vl", r"qvq",
+    # 智谱
+    r"glm-4v", r"glm-4\.\d+v",
+    # DeepSeek
+    r"deepseek-vl", r"deepseek.*vision",
+    # 阶跃 / 零一 / 月之暗面
+    r"step-.*v", r"yi-vl", r"yi-vision", r"moonshot.*vision",
+    # 本地/开源常见视觉模型 (Ollama / vLLM)
+    r"llava", r"bakllava", r"minicpm.*v", r"llama.*vision", r"pixtral",
+    r"internvl", r"cogvlm", r"phi-3.*vision", r"phi-3\.5.*vision",
+    r"molmo", r"idefics",
+]
+_VISION_MODEL_RE = re.compile("|".join(_VISION_MODEL_PATTERNS), re.IGNORECASE)
+
+
+def _model_supports_vision(model: str, user_overrides: list[str] | None) -> bool:
+    """判断 model id 是否具备图像输入能力。
+    优先级:用户覆盖列表(精确匹配) > 启发式正则 > False。
+    """
+    if not model:
+        return False
+    m = model.strip()
+    if not m:
+        return False
+    for x in (user_overrides or []):
+        if isinstance(x, str) and x.strip() and x.strip().lower() == m.lower():
+            return True
+    return bool(_VISION_MODEL_RE.search(m))
+
+
+def _looks_like_vision_error(msg: str) -> bool:
+    """粗判后端错误消息是否在抱怨"你给我发了图片但我不认"。
+    命中就在 UI 上友好提示用户换模型,避免用户以为是网络/密钥问题。
+    """
+    if not msg:
+        return False
+    s = msg.lower()
+    keys = (
+        "image", "vision", "multimodal", "modality",
+        "image_url", "not support", "unsupported",
+        "invalid content", "invalid_type", "invalid message",
+    )
+    return any(k in s for k in keys)
+
 
 # ============================================================================
 # Worker —— 流式调用 OpenAI 兼容 /chat/completions
@@ -1158,13 +821,16 @@ class LLMWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, api_key: str, base_url: str, model: str,
-                 messages: list, temperature: float = 0.7, parent=None):
+                 messages: list, temperature: float = 0.7,
+                 timeout: float = REQUEST_TIMEOUT_DEFAULT, parent=None):
         super().__init__(parent)
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.messages = messages
         self.temperature = temperature
+        # socket 读超时(秒);对流式而言是"两个 chunk 之间最长间隔"
+        self.timeout = max(5.0, float(timeout))
         self._is_cancelled = False
 
     def cancel(self):
@@ -1191,7 +857,8 @@ class LLMWorker(QThread):
                 url, data=data, headers=headers, method="POST")
 
             full = []
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            loop_abort_msg = ""  # 非空即"因循环护栏中止",走 error 分支
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 for raw in resp:
                     if self._is_cancelled:
                         break
@@ -1215,6 +882,33 @@ class LLMWorker(QThread):
                         full.append(piece)
                         self.chunk.emit(piece)
 
+                        # tool_call 循环护栏 —— 只在本片段可能出现相关标签时才
+                        # 全量扫描,避免每 token 都做 O(N) 计数
+                        if "<tool_call>" in piece or "</tool_call>" in piece:
+                            buf = "".join(full)
+                            if buf.count("<tool_call>") > MAX_TOOL_CALL_OPENS:
+                                loop_abort_msg = (
+                                    f"模型陷入 tool_call 循环"
+                                    f"(>{MAX_TOOL_CALL_OPENS} 个开标签),已中止。"
+                                    "常见于小模型/上下文含大量错误回填时;"
+                                    "可清空对话重试或换更强模型"
+                                )
+                                break
+                            # 完全相同的闭合 tool_call 出现 2 次 —— 立即中止
+                            closed = _TOOL_CALL_RE.findall(buf)
+                            if len(closed) >= 2:
+                                stripped = [c.strip() for c in closed]
+                                if len(stripped) != len(set(stripped)):
+                                    loop_abort_msg = (
+                                        "模型重复生成同一 tool_call,已中止。"
+                                        "上一轮 tool_result 可能报错让它死循环重试,"
+                                        "可清空对话重试"
+                                    )
+                                    break
+
+            if loop_abort_msg:
+                self.error.emit(loop_abort_msg)
+                return
             self.finished_msg.emit("".join(full))
 
         except urllib.error.HTTPError as e:
@@ -1224,8 +918,26 @@ class LLMWorker(QThread):
             except Exception:
                 pass
             self.error.emit(f"HTTP {e.code}: {body[:400]}")
+        except TimeoutError:
+            # Python 3.10+ socket.timeout 就是 TimeoutError;这里显式给一条
+            # 用户能一眼看懂的话,并提示如何延长(避免用户以为是密钥/网络问题)
+            self.error.emit(
+                f"请求超时(>{int(self.timeout)}s 无响应)。"
+                "可能原因:密钥/URL 错、服务卡死、网络不通。"
+                "如需延长可在 configs/config.json 设 llm_chat.request_timeout"
+            )
         except urllib.error.URLError as e:
-            self.error.emit(f"网络错误: {e.reason}")
+            # URLError.reason 可能是 socket.timeout / OSError / str
+            reason = e.reason
+            if isinstance(reason, TimeoutError) or (
+                isinstance(reason, OSError) and "timed out" in str(reason).lower()
+            ):
+                self.error.emit(
+                    f"连接超时(>{int(self.timeout)}s)。"
+                    "检查 Base URL 是否可达 / 是否需要代理"
+                )
+            else:
+                self.error.emit(f"网络错误: {reason}")
         except Exception as e:
             self.error.emit(f"{type(e).__name__}: {e}")
 
@@ -1238,10 +950,12 @@ class ModelListWorker(QThread):
     finished_list = pyqtSignal(list)  # 排序去重后的模型 ID 列表
     error = pyqtSignal(str)
 
-    def __init__(self, api_key: str, base_url: str, parent=None):
+    def __init__(self, api_key: str, base_url: str,
+                 timeout: float = MODELS_TIMEOUT, parent=None):
         super().__init__(parent)
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self.timeout = max(3.0, float(timeout))
 
     def run(self):
         try:
@@ -1251,7 +965,7 @@ class ModelListWorker(QThread):
             if self.api_key:
                 req.add_header("Authorization", f"Bearer {self.api_key}")
 
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
 
             try:
@@ -1286,8 +1000,20 @@ class ModelListWorker(QThread):
             except Exception:
                 pass
             self.error.emit(f"HTTP {e.code}: {body[:200]}")
+        except TimeoutError:
+            self.error.emit(
+                f"拉取模型列表超时(>{int(self.timeout)}s)。检查 Base URL 与网络"
+            )
         except urllib.error.URLError as e:
-            self.error.emit(f"网络错误: {e.reason}")
+            reason = e.reason
+            if isinstance(reason, TimeoutError) or (
+                isinstance(reason, OSError) and "timed out" in str(reason).lower()
+            ):
+                self.error.emit(
+                    f"连接超时(>{int(self.timeout)}s)。检查 Base URL 与网络"
+                )
+            else:
+                self.error.emit(f"网络错误: {reason}")
         except Exception as e:
             self.error.emit(f"{type(e).__name__}: {e}")
 
@@ -2119,11 +1845,18 @@ class LLMChatPage(QWidget):
         self._pending_files: list[str] = []
         self._history: list[dict] = []
         self._streaming_bubble: MessageBubble | None = None
+        # 只对"下一次 _build_request_messages() 调用"生效的图片附件列表。
+        # _on_send 装填,_build_request_messages 消费后清空 —— 保证图片仅在
+        # 当轮 payload 里出现,history 与后续轮次都不带 base64。
+        self._extra_image_paths_once: list[str] = []
 
         # 工具调度状态。每轮 LLM 回复结束后,如果解析出 <tool_call>,
         # 进入串行执行模式;全部跑完再把 <tool_result> 拼到 history,
         # 触发下一轮 LLM 调用直到没有新的工具调用为止。
         self._tool_handlers = {
+            # 元工具:按 name 查 TOOL_REGISTRY 返回完整 spec。系统提示词里
+            # 只放"工具名录 + 一句话简介",模型要用某个工具前先调这个拉规格。
+            "get_tool_spec": self._tool_get_tool_spec,
             "list_dir": self._tool_list_dir,
             "read_file": self._tool_read_file,
             "demucs_separate": self._tool_demucs_separate,
@@ -2373,10 +2106,27 @@ class LLMChatPage(QWidget):
         self._attach_btn = TransparentToolButton(ICON_ATTACH, card)
         self._attach_btn.setToolTip(
             "添加文件附件\n"
-            "支持纯文本 / 代码 / 字幕 / 日志；单文件 ≤ 256 KB\n"
-            "二进制或更大的文件只发送元信息")
+            "文本 / 代码 / 字幕 / 日志：内联到消息(单文件 ≤ 256 KB)\n"
+            "图片 (png/jpg/webp/gif/bmp ≤ 6 MB)：走视觉输入,\n"
+            "  仅在视觉模型下生效 (gpt-4o / claude-3+ / qwen-vl / glm-4v / llava 等)\n"
+            "音频 / 视频 / 其它二进制:只发路径,由 LLM 调本地工具处理")
         self._attach_btn.setFixedSize(32, 32)
         tool_row.addWidget(self._attach_btn)
+
+        # 多模态开关 —— ON 时,当轮消息里的图片以 base64 data URL 塞进 payload
+        # (需要模型本身支持视觉);OFF 时图片只发路径,由 LLM 走 yolo_detect /
+        # realesrgan_upscale 之类的工具链。
+        # 关键约束: 图片只放在"本轮"请求里,history 里保留纯文本占位,
+        # 后续轮次(含 tool_result 回填)不会重复携带,避免 payload 越滚越大。
+        self._mm_switch = SwitchButton(card)
+        self._mm_switch.setOnText("多模态")
+        self._mm_switch.setOffText("多模态")
+        self._mm_switch.setToolTip(
+            "多模态视觉输入\n"
+            "开:附件里的图片会作为 image_url 传给模型 (需模型支持视觉)\n"
+            "关:图片只发路径,让 LLM 用 yolo_detect / realesrgan_upscale 等工具处理\n"
+            "注意:图片只在当次请求内出现,不会滚进后续轮次的 history")
+        tool_row.addWidget(self._mm_switch, 0, Qt.AlignmentFlag.AlignVCenter)
 
         tool_row.addStretch()
 
@@ -2429,6 +2179,9 @@ class LLMChatPage(QWidget):
         self.input_edit.textChanged.connect(self._resize_input)
         self.input_edit.filesDropped.connect(self._on_files_dropped)
 
+        # 多模态开关变化 -> 排队防抖保存(状态本身在下次 _on_send 时读取)
+        self._mm_switch.checkedChanged.connect(lambda _v: self._save_timer.start())
+
     # ------------------------------------------------------------------ config
     def _on_config_field_changed(self, *_):
         """任何配置字段变化时统一入口：刷新 pill + 排队防抖保存"""
@@ -2443,6 +2196,7 @@ class LLMChatPage(QWidget):
                 "base_url": self.base_edit.text().strip(),
                 "model": self.model_combo.currentText().strip(),
                 "api_key": self.key_edit.text().strip(),
+                "multimodal": bool(self._mm_switch.isChecked()),
             }
         })
 
@@ -2452,6 +2206,12 @@ class LLMChatPage(QWidget):
         cfg_model = get_field(f"{self.CFG_NAMESPACE}.model", "")
         cfg_key = get_field(f"{self.CFG_NAMESPACE}.api_key", "")
         cfg_models = get_field(f"{self.CFG_NAMESPACE}.models", []) or []
+        cfg_mm = bool(get_field(f"{self.CFG_NAMESPACE}.multimodal", False))
+
+        # 还原开关状态(setChecked 会触发 checkedChanged,和下面 blockSignals
+        # 保护其它字段的思路一样,防抖 timer 靠 _connect_signals 里挂的 slot
+        # 排队即可,不会立刻回写)
+        self._mm_switch.setChecked(cfg_mm)
 
         # 先把 provider 选好（不触发 _apply_provider）
         if cfg_provider in PROVIDER_PRESETS:
@@ -2633,6 +2393,8 @@ class LLMChatPage(QWidget):
         self.msg_layout.addWidget(self.empty_hint)
         self.msg_layout.addStretch()
         self._history.clear()
+        self._extra_image_paths_once = []
+        self._last_request_had_images = False
 
     def _on_cancel(self):
         any_cancelled = False
@@ -2689,8 +2451,42 @@ class LLMChatPage(QWidget):
                 sz = 0
             user_bubble.add_attachment(Path(p).name, sz)
 
-        full_user_msg = self._build_user_content(text, self._pending_files)
+        # 决定本轮是否真的把图片 base64 塞进 payload:
+        #   开关 = 用户意图,是否发图完全由它决定;
+        #   启发式 = 一个"猜"结果,只用来在没命中已知视觉模型时提示用户"可能失败",
+        #            **不再**拿它去否决用户的开关 —— 否则用户明明打开了却发不出去,
+        #            很反直觉;真的模型不支持会被 _looks_like_vision_error 捕获并给
+        #            友好错误。
+        mm_on = self._mm_switch.isChecked()
+        vision_ok = _model_supports_vision(
+            model,
+            get_field(f"{self.CFG_NAMESPACE}.vision_models", []) or [],
+        )
+        vision_active = mm_on
+
+        full_user_msg, image_paths = self._build_user_content(
+            text, self._pending_files, vision_active=vision_active)
+
+        # history 里永远存"纯文本占位版",这样后续轮次(继续对话 / 工具结果
+        # 注入回滚)拿到的都是文本,不会把图片反复携带进 payload。
         self._history.append({"role": "user", "content": full_user_msg})
+
+        # 本次请求专用的 messages:只在这里克隆最后一条 user 消息、把图片挂上,
+        # 不动 self._history。用 _extra_image_paths_once 传给下面 messages 构造,
+        # _build_request_messages 消费一次就清空。
+        self._extra_image_paths_once = []
+        if image_paths and vision_active:
+            self._extra_image_paths_once = list(image_paths)
+            if not vision_ok:
+                InfoBar.warning(
+                    "模型未在视觉清单里",
+                    f"'{model}' 未匹配启发式视觉模型规则,仍按多模态开关照发;"
+                    "若模型确实不支持视觉将返回错误,可在 configs/config.json 的 "
+                    "llm_chat.vision_models 里手动加上此 id,或换 gpt-4o / claude-3+ "
+                    "/ qwen-vl / glm-4v / llava 等已知支持视觉的模型",
+                    parent=self, duration=4000,
+                    position=InfoBarPosition.TOP,
+                )
 
         bot_bubble = self._add_bubble("assistant")
         bot_bubble.set_streaming(True)
@@ -2699,19 +2495,32 @@ class LLMChatPage(QWidget):
         self.input_edit.clear()
         self._clear_pending_files()
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}] + self._history
+        messages = self._build_request_messages()
         self._set_busy(True)
         self._worker = LLMWorker(
             api_key=self.key_edit.text().strip(),
             base_url=base,
             model=model,
             messages=messages,
+            timeout=self._cfg_request_timeout(),
         )
         self._worker.chunk.connect(self._on_chunk)
         self._worker.finished_msg.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
+
+    def _cfg_request_timeout(self) -> float:
+        """读用户配置的请求超时秒数;非法/负值/超范围回落到默认。
+        clamp 到 [5, 600] 防止误配把请求卡到永远,或短到根本连不上。"""
+        raw = get_field(
+            f"{self.CFG_NAMESPACE}.request_timeout", REQUEST_TIMEOUT_DEFAULT)
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return REQUEST_TIMEOUT_DEFAULT
+        if v <= 0:
+            return REQUEST_TIMEOUT_DEFAULT
+        return max(5.0, min(600.0, v))
 
     # ------------------------------------------------------------------ helpers
     def _resize_input(self):
@@ -2730,9 +2539,26 @@ class LLMChatPage(QWidget):
                 w.deleteLater()
         self.chip_wrap.setVisible(False)
 
-    def _build_user_content(self, text: str, files: list[str]) -> str:
+    def _build_user_content(self, text: str, files: list[str],
+                            vision_active: bool = True) -> tuple[str, list[str]]:
+        """把用户输入 + 附件序列化成 (文本, 图片路径列表) 二元组。
+
+        - 图片附件(IMAGE_INLINE_EXTS 白名单):
+            * vision_active=True(多模态开关开 + 模型支持视觉):文本里留
+              `--- 图片: name ---` 占位 + 路径,图片本体走返回值里的 list,
+              交给外层以 image_url data URL 送进模型;
+            * vision_active=False:改用"不可见"占位,明确告诉模型它看不到图片,
+              别猜内容,该走 yolo_detect/realesrgan_upscale 或让用户描述。
+              这样非视觉模型不会因为看到 `--- 图片: xxx ---` marker 就当自己
+              直接看过图,顺嘴瞎答。
+        - 音频 / 视频 / 其它二进制:一律不内联,只写元信息 + 路径,让模型走
+          whisper_transcribe / demucs_separate / yolo_detect 等本地工具。
+        - 文本附件:仍走内联 fenced code 块的老逻辑。
+        - 目录:仍走 `--- 目录: name ---` 占位,让模型用 list_dir 探查。
+        """
+        image_paths: list[str] = []
         if not files:
-            return text
+            return text, image_paths
         parts = [text] if text else []
         for p in files:
             abspath = os.path.abspath(p)
@@ -2751,6 +2577,41 @@ class LLMChatPage(QWidget):
                 size = os.path.getsize(p)
             except OSError:
                 size = 0
+
+            # 图片附件:根据当前模型能力决定内联 or 走路径
+            if ext in IMAGE_INLINE_EXTS:
+                if size > MAX_IMAGE_BYTES:
+                    # 太大就退化成 "路径 + 元信息",避免 base64 后爆 payload。
+                    # 模型仍可选择 realesrgan_upscale / yolo_detect 处理。
+                    parts.append(
+                        f"\n\n--- 附件: {name} ({size} bytes, image) "
+                        f"[图片超过 {MAX_IMAGE_BYTES // 1024 // 1024} MB,未内联] ---\n"
+                        f"路径: {abspath}"
+                    )
+                    continue
+                if vision_active:
+                    # 图片附件旁只留最小提示 —— 特意不在这里罗列 yolo_detect /
+                    # realesrgan_upscale, 免得视觉模型把"看到图片"和"该调工具"绑成
+                    # 反射;是否用工具由 SYSTEM_PROMPT 的默认行为约束 + 用户明确请求决定。
+                    parts.append(
+                        f"\n\n--- 图片: {name} ---\n"
+                        f"路径: {abspath}"
+                    )
+                    image_paths.append(abspath)
+                else:
+                    # 模型不具备视觉能力或多模态开关关闭 —— 图片本体不会送达。
+                    # 换掉 marker 并显式告知模型看不到图片,避免它照 SYSTEM_PROMPT
+                    # 里"视觉直接观察作答"的默认路径瞎编。
+                    parts.append(
+                        f"\n\n--- 图片附件: {name} (未内联,当前模型不接收视觉输入) ---\n"
+                        f"路径: {abspath}\n"
+                        f"(你无法直接查看这张图片,不要猜测图中内容。"
+                        f"用户明确要求「检测/画框/放大/超分」时才调 "
+                        f"yolo_detect / realesrgan_upscale;"
+                        f"想直接看图请让用户改用支持视觉的模型或打开多模态开关。)"
+                    )
+                continue
+
             if ext in TEXT_EXTS and size <= MAX_FILE_BYTES:
                 try:
                     with open(p, "r", encoding="utf-8", errors="replace") as f:
@@ -2778,7 +2639,30 @@ class LLMChatPage(QWidget):
                     f"[二进制或过大，未内联] ---\n"
                     f"路径: {abspath}"
                 )
-        return "\n".join(parts)
+        return "\n".join(parts), image_paths
+
+    @staticmethod
+    def _image_to_data_url(path: str) -> str | None:
+        """把本地图片读成 `data:image/xxx;base64,...` 形式,失败返回 None。
+        MIME 首先按扩展名猜,再回落到 image/octet-stream;.jpg/.jpeg 归一到 image/jpeg。
+        """
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        ext = os.path.splitext(path)[1].lower()
+        mime_map = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+        }
+        mime = mime_map.get(ext) or (mimetypes.guess_type(path)[0] or "image/png")
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime};base64,{b64}"
 
     def _add_bubble(self, role: str) -> MessageBubble:
         model = self.model_combo.currentText().strip() if role == "assistant" else ""
@@ -2857,6 +2741,34 @@ class LLMChatPage(QWidget):
             # 进入工具执行流程,保持 busy 状态,直到全部跑完并拿到下一轮 LLM 回复。
             self._execute_tool_calls(calls)
             return
+
+        # ---- "意图调工具但没实际发出"兜底提示 -------------------------------
+        # 视觉/小模型经常"先看规格:"之后直接 EOS,一个 <tool_call> 都没吐,
+        # 用户只看到半句话没下文。这里挑两个"露馅"信号做启发式判断:
+        #   1) 文本里出现了 <tool_call> 开标签 —— 定是想调,但被截断/JSON 坏
+        #   2) 文本里直接提到 get_tool_spec 或某个 TOOL_REGISTRY 里的工具名 ——
+        #      这些字符串本该只出现在 <tool_call>{...} JSON 里,漏在正文里
+        #      基本就是模型想调却漏了标签
+        # 命中就弹 InfoBar 建议用户回复"继续"或换模型,而不是让用户瞪着屏幕
+        text = full or ""
+        intent_hint = ""
+        if _TOOL_CALL_OPEN_RE.search(text):
+            intent_hint = "模型的 <tool_call> 被截断了(JSON 未闭合)"
+        else:
+            # 只在文本明显泄漏工具协议关键词时提示,避免误伤正常问答
+            leaked = [n for n in TOOL_REGISTRY.keys() if n in text]
+            if "get_tool_spec" in text or leaked:
+                which = "get_tool_spec" if "get_tool_spec" in text else leaked[0]
+                intent_hint = f"模型提到 `{which}` 但没实际发出 <tool_call>"
+        if intent_hint:
+            InfoBar.warning(
+                "模型没把工具调用发全",
+                f"{intent_hint}。可回复\"继续\"让它补上,"
+                "或换用工具调用更稳的模型(视觉+工具组合尤其容易漏)",
+                parent=self, duration=5500,
+                position=InfoBarPosition.TOP,
+            )
+
         self._set_busy(False)
 
     # ------------------------------------------------------------------ tool calling
@@ -3099,20 +3011,108 @@ class LLMChatPage(QWidget):
         bot_bubble.set_streaming(True)
         self._streaming_bubble = bot_bubble
 
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}] + self._history
+        # 工具结果这轮不再挂图片 —— _extra_image_paths_once 已经在上一轮消费掉
+        messages = self._build_request_messages()
         self._worker = LLMWorker(
             api_key=self.key_edit.text().strip(),
             base_url=base,
             model=model,
             messages=messages,
+            timeout=self._cfg_request_timeout(),
         )
         self._worker.chunk.connect(self._on_chunk)
         self._worker.finished_msg.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.start()
 
+    def _build_request_messages(self) -> list[dict]:
+        """构造发给 /chat/completions 的 messages 列表。
+
+        流程:
+          - 系统 prompt + self._history 直接拼上;
+          - 若 self._extra_image_paths_once 非空,克隆最后一条 user 消息、
+            把 content 从 str 升级成 [ {type:text}, {type:image_url}, ... ]
+            结构,只作用于本次请求;
+          - 消费完 self._extra_image_paths_once 立刻清空,保证图片"仅本轮生效",
+            后续轮次(工具结果继续对话时)不会重复携带同一批 base64。
+        """
+        msgs: list[dict] = (
+            [{"role": "system", "content": SYSTEM_PROMPT}]
+            + [dict(m) for m in self._history]
+        )
+        pending = getattr(self, "_extra_image_paths_once", None) or []
+        self._last_request_had_images = False
+        if pending and msgs and msgs[-1].get("role") == "user":
+            last = msgs[-1]
+            text = last.get("content")
+            if not isinstance(text, str):
+                text = str(text)
+            parts: list[dict] = [{"type": "text", "text": text}]
+            attached = 0
+            for ip in pending:
+                url = self._image_to_data_url(ip)
+                if url is None:
+                    continue
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                })
+                attached += 1
+            if attached:
+                last["content"] = parts
+                self._last_request_had_images = True
+        # 消费:图片"只出现一轮",下一轮 tool_result 继续对话时不再重复挂
+        self._extra_image_paths_once = []
+        return msgs
+
     # 工具实现 ----------------------------------------------------------------
+    def _tool_get_tool_spec(self, args: dict):
+        """元工具:按 name 查 TOOL_REGISTRY 返回完整 spec(参数/enum/默认/返回)。
+
+        系统提示词里只放"工具名录 + 简介"以省 tokens,模型第一次要用某个工具时
+        通过本工具拉规格,规格随 tool_result 落进 history,同一会话后续都能复用。
+        args:
+            names: list[str] —— 要拉规格的工具名;也接受单字符串以兼容模型误传。
+        """
+        def reply(ok: bool, result: str):
+            QTimer.singleShot(
+                0, lambda: self._on_tool_done("get_tool_spec", ok, result))
+
+        raw = args.get("names")
+        if raw is None:
+            raw = args.get("name")  # 兼容模型少写 s
+        if isinstance(raw, str):
+            names = [raw.strip()] if raw.strip() else []
+        elif isinstance(raw, list):
+            names = [n.strip() for n in raw if isinstance(n, str) and n.strip()]
+        else:
+            names = []
+
+        if not names:
+            reply(False,
+                  "缺少 names 参数(工具名数组,如 [\"demucs_separate\",\"rvc_convert\"])。"
+                  "可用工具见 SYSTEM_PROMPT 的『可用工具目录』。")
+            return
+
+        rendered: list[str] = []
+        unknown: list[str] = []
+        for n in names:
+            spec = TOOL_REGISTRY.get(n)
+            if spec is None:
+                unknown.append(n)
+                continue
+            rendered.append(_format_tool_spec(n, spec))
+
+        if not rendered:
+            reply(False,
+                  f"未知工具: {', '.join(unknown)}。"
+                  "可用工具名见 SYSTEM_PROMPT 目录,请检查拼写。")
+            return
+        body = "\n\n".join(rendered)
+        if unknown:
+            body += f"\n\n(以下工具名未知,已跳过: {', '.join(unknown)})"
+        reply(True, body)
+
     def _tool_list_dir(self, args: dict):
         """同步列目录。通过 QTimer 把回调推回事件循环,
         避免 handler -> _on_tool_done -> _run_next_tool -> handler ... 同步递归。
@@ -3217,6 +3217,51 @@ class LLMChatPage(QWidget):
         )
         reply(True, header + text)
 
+    # HTML 日志行剥标签用 —— worker 的 output/log_line 里带 <span style=...>
+    _LOG_HTML_RE = re.compile(r"<[^>]+>")
+
+    def _wire_tool_log_tail(self, worker, tool_name: str,
+                            log_signals=("output",)):
+        """给 tool worker 挂"最近 120 行捕获 + 错误尾巴拼接"。
+
+        返回一个 `error_slot(msg)` 函数,直接接到 `worker.error.connect(...)`
+        上就行。它会把 worker 生命周期里通过 output/log_line 吐出的最后 30 行
+        原始日志拼在错误消息后面,再走 `_on_tool_done`。
+
+        这样 LLM 拿到的不再是"生成失败 (返回码: 1)"这种没头没尾的一句话,
+        而是能看到 HF SSL EOF / CUDA OOM / 缺依赖 traceback 之类的真因,
+        就能给用户对症下药的建议(而不是让它瞎猜"可能显存不足")。
+
+        log_signals: worker 上"实时输出"信号名的候选;只 connect 真实存在的
+        (通常 "output",少数用 "log_line")。一个 helper 罩住两种命名习惯。
+        """
+        log_tail: list[str] = []
+
+        def _capture(html_line: str):
+            plain = self._LOG_HTML_RE.sub("", html_line or "").strip()
+            if not plain:
+                return
+            log_tail.append(plain)
+            if len(log_tail) > 120:
+                del log_tail[: len(log_tail) - 120]
+
+        for name in log_signals:
+            sig = getattr(worker, name, None)
+            if sig is not None and hasattr(sig, "connect"):
+                sig.connect(_capture)
+
+        def error_slot(msg: str):
+            if log_tail:
+                tail = "\n".join(log_tail[-30:])
+                full = (f"{msg}\n\n"
+                        f"--- worker 最后 {min(30, len(log_tail))} 行输出 ---\n"
+                        f"{tail}")
+            else:
+                full = msg
+            self._on_tool_done(tool_name, False, full)
+
+        return error_slot
+
     def _tool_demucs_separate(self, args: dict):
         """启动 DemucsWorker。完成 / 失败时回调 _on_tool_done。"""
         # 延迟 import 避免冷启动加载 torch 相关依赖。
@@ -3259,8 +3304,7 @@ class LLMChatPage(QWidget):
         worker.progress.connect(self._on_tool_progress)
         worker.finished.connect(
             lambda out_dir: self._on_tool_done("demucs_separate", True, out_dir))
-        worker.error.connect(
-            lambda msg: self._on_tool_done("demucs_separate", False, msg))
+        worker.error.connect(self._wire_tool_log_tail(worker, "demucs_separate"))
         worker.start()
 
     def _tool_mix_audio(self, args: dict):
@@ -3388,8 +3432,7 @@ class LLMChatPage(QWidget):
             lambda out_dir: self._on_tool_done(
                 "whisper_transcribe", True, out_dir))
         worker.error.connect(
-            lambda msg: self._on_tool_done(
-                "whisper_transcribe", False, msg))
+            self._wire_tool_log_tail(worker, "whisper_transcribe"))
         worker.start()
 
     def _tool_rvc_convert(self, args: dict):
@@ -3477,9 +3520,7 @@ class LLMChatPage(QWidget):
         worker.finished.connect(
             lambda out_dir: self._on_tool_done(
                 "rvc_convert", True, out_dir))
-        worker.error.connect(
-            lambda msg: self._on_tool_done(
-                "rvc_convert", False, msg))
+        worker.error.connect(self._wire_tool_log_tail(worker, "rvc_convert"))
         worker.start()
 
     def _tool_gptsovits_tts(self, args: dict):
@@ -3563,8 +3604,7 @@ class LLMChatPage(QWidget):
         worker.progress.connect(self._on_tool_progress)
         worker.finished.connect(
             lambda out: self._on_tool_done("gptsovits_tts", True, out))
-        worker.error.connect(
-            lambda msg: self._on_tool_done("gptsovits_tts", False, msg))
+        worker.error.connect(self._wire_tool_log_tail(worker, "gptsovits_tts"))
         worker.start()
 
     def _tool_realesrgan_upscale(self, args: dict):
@@ -3645,62 +3685,32 @@ class LLMChatPage(QWidget):
             "tta":        bool(args.get("tta", False)),
         }
 
-        # ── 日志捕获 ──────────────────────────────────────────────────────
-        # ncnn-vulkan 的 stderr 全部走 worker.output(HTML 串)。原来没接,
-        # 失败时只剩 "推理失败,返回码 N" 这种没用的消息。这里:
-        #   1) 实时把每行剥成纯文本打到 stderr,方便用户从终端看;
-        #   2) 留一份 tail 缓冲,error 触发时把最后 ~30 行追加到错误消息里,
-        #      用户在工具卡片上就能看到具体崩在哪。
-        log_tail: list[str] = []
-        _HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-        def _capture_log(html_line: str):
-            plain = _HTML_TAG_RE.sub("", html_line or "").strip()
-            if not plain:
-                return
-            log_tail.append(plain)
-            if len(log_tail) > 120:
-                del log_tail[: len(log_tail) - 120]
-            try:
-                sys.stderr.write(f"[realesrgan] {plain}\n")
-                sys.stderr.flush()
-            except Exception:
-                pass
-
-        def _wrap_error(msg: str):
-            if log_tail:
-                tail = "\n".join(log_tail[-30:])
-                full = (f"{msg}\n\n"
-                        f"--- worker 最后 {min(30, len(log_tail))} 行输出 ---\n"
-                        f"{tail}")
-            else:
-                full = msg
-            self._on_tool_done("realesrgan_upscale", False, full)
-
+        # 单张走 output、批量走 log_line —— 两种信号名都由 _wire_tool_log_tail
+        # 罩住。原来只接 error 一路,失败时 LLM 只看到"返回码 N",猜不到真因;
+        # 现在错误尾巴带最后 30 行 stderr,能看到具体崩在哪。
         if len(files) == 1:
             worker = RealESRGANWorker({**base_params, "input": files[0]})
             self._tool_worker = worker
             worker.progress.connect(self._on_tool_progress)
-            worker.output.connect(_capture_log)
             # RealESRGANWorker.finished 是 pyqtSignal(str, float) ——
             # 第一个参数就是产物路径(文件输入->单张图;目录输入->输出目录)
             worker.finished.connect(
                 lambda out_path, _elapsed: self._on_tool_done(
                     "realesrgan_upscale", True, out_path))
-            worker.error.connect(_wrap_error)
+            worker.error.connect(self._wire_tool_log_tail(
+                worker, "realesrgan_upscale", log_signals=("output",)))
             worker.start()
         else:
             worker = BatchRealESRGANWorker(files, base_params)
             self._tool_worker = worker
             worker.progress.connect(self._on_tool_progress)
-            # BatchRealESRGANWorker 用 log_line 而不是 output;名字不同信号一样
-            worker.log_line.connect(_capture_log)
             # BatchRealESRGANWorker.finished 是 pyqtSignal(int, float)
             # (成功数, 耗时),拿不到路径 —— 用我们传给 worker 的 output_dir
             worker.finished.connect(
                 lambda _count, _elapsed: self._on_tool_done(
                     "realesrgan_upscale", True, output_dir))
-            worker.error.connect(_wrap_error)
+            worker.error.connect(self._wire_tool_log_tail(
+                worker, "realesrgan_upscale", log_signals=("log_line",)))
             worker.start()
 
     def _tool_yolo_detect(self, args: dict):
@@ -3820,8 +3830,8 @@ class LLMChatPage(QWidget):
             lambda count, elapsed: self._on_tool_done(
                 "yolo_detect", True,
                 f"{out_dir}\n({count}/{len(files)} 张完成,耗时 {elapsed:.1f}s)"))
-        worker.error.connect(
-            lambda msg: self._on_tool_done("yolo_detect", False, msg))
+        worker.error.connect(self._wire_tool_log_tail(
+            worker, "yolo_detect", log_signals=("log_line",)))
         worker.start()
 
     def _tool_musicgen_compose(self, args: dict):
@@ -3928,8 +3938,10 @@ class LLMChatPage(QWidget):
         # finished 发输出目录绝对路径
         worker.finished.connect(
             lambda result_dir: self._on_tool_done(tool_name, True, result_dir))
-        worker.error.connect(
-            lambda msg: self._on_tool_done(tool_name, False, msg))
+        # error 走 helper —— 把 _audiocraft_runner.py 的 stderr(HF SSL EOF /
+        # CUDA OOM / triton 缺依赖等)拼到"生成失败 (返回码 1)"后面,
+        # LLM 才能真正判断故障类型给用户对症建议
+        worker.error.connect(self._wire_tool_log_tail(worker, tool_name))
         worker.start()
 
     # 素材抓取:三个工具共享一个 MaterialFetchWorker,只是 op 不同 -----------------
@@ -4025,5 +4037,20 @@ class LLMChatPage(QWidget):
             self._streaming_bubble.set_text(f"调用失败：{msg}")
             self._streaming_bubble = None
         self._set_busy(False)
+
+        # 粗判是不是"图片喂给了不认视觉的模型"这种典型错误 ——
+        # 若本轮请求确实挂了 image_url 且报错关键词命中,给用户改换模型的
+        # 明确指引,免得他们把它当成网络 / 密钥问题反复试。
+        # 注意:history 里从不留 base64,所以判据来自 _build_request_messages
+        # 设置的一次性标记 _last_request_had_images。
+        looked_visionish = bool(getattr(self, "_last_request_had_images", False))
+        if looked_visionish and _looks_like_vision_error(msg):
+            InfoBar.error(
+                "该模型可能不支持视觉输入",
+                "请换 gpt-4o / claude-3+ / qwen-vl / glm-4v / llava 等具备视觉能力的模型,"
+                "或去 configs/config.json 的 llm_chat.vision_models 把当前模型手动加进去",
+                parent=self, duration=6000, position=InfoBarPosition.TOP,
+            )
+            return
         InfoBar.error("请求失败", msg[:200], parent=self,
                       position=InfoBarPosition.TOP, duration=4000)

@@ -664,6 +664,163 @@ class PackageManagerCard(ExpandGroupSettingCard):
                      "查看 / 卸载已安装包，诊断依赖冲突", self.open_btn)
 
 
+class ProxyCard(ExpandGroupSettingCard):
+    """HTTP 代理配置卡 —— 一次配置,统一给工具子进程 + LLM chat + pip/git 用。
+
+    动机: 用户开 Clash / v2ray 全局模式时,系统代理经常拦不干净 python urllib
+    的 TLS 握手,huggingface.co 下载模型会 SSL EOF (musicgen/whisper 都踩过)。
+    这里显式把请求路由到 HTTP proxy 端口,避免走系统 TUN。
+    切开关立即生效: subprocess_env 会合并这些键,主进程 urllib 也重装 opener。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(
+            FIF.GLOBE, "HTTP 代理",
+            "为工具子进程和 LLM 请求统一走同一个代理;"
+            "修复 Clash 全局模式下 HF/pip SSL EOF 错误。",
+            parent,
+        )
+        self.viewLayout.setContentsMargins(0, 0, 0, 0)
+        self.viewLayout.setSpacing(0)
+
+        # ── 代理 URL ─────────────────────────────────────────
+        self.url_edit = LineEdit(self)
+        self.url_edit.setPlaceholderText("http://127.0.0.1:7890")
+        self.url_edit.setFixedWidth(240)
+
+        # ── 跳过代理列表 ────────────────────────────────────
+        self.no_edit = LineEdit(self)
+        self.no_edit.setPlaceholderText("127.0.0.1,localhost")
+        self.no_edit.setFixedWidth(240)
+
+        # ── 状态 + 测试 + 开关 (同一行) ────────────────────
+        ctl_widget = QWidget(self)
+        ctl_layout = QHBoxLayout(ctl_widget)
+        ctl_layout.setContentsMargins(20, 12, 20, 12)
+        ctl_layout.setSpacing(10)
+        self.status_lbl = CaptionLabel("未启用", self)
+        self.status_lbl.setStyleSheet("color:rgba(128,128,128,180);")
+        ctl_layout.addWidget(self.status_lbl, 1)
+        self.test_btn = PushButton(
+            "测试连通性", self, getattr(FIF, "SEND", None) or FIF.LINK)
+        self.test_btn.clicked.connect(self._on_test)
+        ctl_layout.addWidget(self.test_btn)
+        self.toggle = SwitchButton(self)
+        self.toggle.checkedChanged.connect(self._on_toggled)
+        ctl_layout.addWidget(self.toggle)
+
+        self.addGroup(FIF.LINK, "代理 URL",
+                     "如 http://127.0.0.1:7890 (Clash HTTP 混合端口)",
+                     self.url_edit)
+        self.addGroup(FIF.HOME, "不走代理的主机",
+                     "逗号分隔;本机地址一般都要留",
+                     self.no_edit)
+        self.addGroupWidget(ctl_widget)
+
+        # 输入变动即持久化,不用等切开关
+        self.url_edit.editingFinished.connect(self._save_fields)
+        self.no_edit.editingFinished.connect(self._save_fields)
+
+        self._load_from_config()
+
+    def _load_from_config(self):
+        enabled = bool(get_field("proxy.enabled", False))
+        url = (get_field("proxy.url", "") or "").strip()
+        no_proxy = (get_field("proxy.no_proxy",
+                              "127.0.0.1,localhost,0.0.0.0,::1") or "").strip()
+        self.url_edit.setText(url)
+        self.no_edit.setText(no_proxy)
+        self.toggle.blockSignals(True)
+        self.toggle.setChecked(enabled)
+        self.toggle.blockSignals(False)
+        self._refresh_status(enabled)
+
+    def _save_fields(self):
+        set_field("proxy.url", self.url_edit.text().strip())
+        set_field("proxy.no_proxy", self.no_edit.text().strip())
+        # 若代理正处于启用状态,输入改动后重刷 env 让新 URL 立即生效
+        if self.toggle.isChecked():
+            try:
+                from utils.paths import apply_proxy_env
+                apply_proxy_env()
+                self._refresh_status(True)
+            except Exception as e:
+                error(f"[settings] 应用代理失败: {e}")
+
+    def _refresh_status(self, enabled: bool):
+        if enabled:
+            url = self.url_edit.text().strip() or "(未配置)"
+            self.status_lbl.setText(f"已启用 · {url}")
+            self.status_lbl.setStyleSheet("color:#4CAF50;")
+        else:
+            self.status_lbl.setText("未启用")
+            self.status_lbl.setStyleSheet("color:rgba(128,128,128,180);")
+
+    def _on_toggled(self, checked: bool):
+        if checked and not self.url_edit.text().strip():
+            InfoBar.warning(
+                "需要 URL", "请先填写代理地址 (如 http://127.0.0.1:7890)",
+                parent=self.window(), duration=3000)
+            self.toggle.blockSignals(True)
+            self.toggle.setChecked(False)
+            self.toggle.blockSignals(False)
+            return
+        set_field("proxy.enabled", checked)
+        set_field("proxy.url", self.url_edit.text().strip())
+        set_field("proxy.no_proxy", self.no_edit.text().strip())
+        try:
+            from utils.paths import apply_proxy_env
+            apply_proxy_env()
+        except Exception as e:
+            error(f"[settings] 应用代理失败: {e}")
+        self._refresh_status(checked)
+        InfoBar.success(
+            "已启用代理" if checked else "已关闭代理",
+            "对新子进程和 LLM 请求立即生效;已运行的进程不受影响",
+            parent=self.window(), duration=2500,
+        )
+
+    def _on_test(self):
+        """用当前 URL 直接 HEAD huggingface.co,验证代理能不能通 HF。
+        不落盘 config,不改运行态 —— 就是探测一下。"""
+        import urllib.request
+        import urllib.error
+        import socket
+        url = self.url_edit.text().strip()
+        if not url:
+            InfoBar.warning("需要 URL", "先填代理地址再测试",
+                            parent=self.window(), duration=3000)
+            return
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("测试中…")
+        try:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": url, "https": url}))
+            req = urllib.request.Request(
+                "https://huggingface.co", method="HEAD")
+            with opener.open(req, timeout=8) as resp:
+                code = resp.status
+            if 200 <= code < 400:
+                InfoBar.success(
+                    "代理可用", f"HF HEAD → HTTP {code}",
+                    parent=self.window(), duration=3500)
+            else:
+                InfoBar.warning(
+                    "代理返回异常", f"HTTP {code}",
+                    parent=self.window(), duration=3500)
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
+            InfoBar.error(
+                "代理不通", f"{type(e).__name__}: {str(e)[:200]}",
+                parent=self.window(), duration=5000)
+        except Exception as e:
+            InfoBar.error(
+                "测试失败", f"{type(e).__name__}: {str(e)[:200]}",
+                parent=self.window(), duration=5000)
+        finally:
+            self.test_btn.setEnabled(True)
+            self.test_btn.setText("测试连通性")
+
+
 class ApiServerCard(ExpandGroupSettingCard):
     """HTTP API 服务卡片 —— 把 8 个工具开放成 FastAPI 接口。
 
@@ -880,6 +1037,10 @@ class SettingsWidget(QWidget):
 
         self.pkg_card = PackageManagerCard(self._open_package_manager, content)
         layout.addWidget(self.pkg_card)
+
+        # 代理放在 API 服务前:多数下载类问题(pip / HF)排在 API 之前需要处理
+        self.proxy_card = ProxyCard(content)
+        layout.addWidget(self.proxy_card)
 
         self.api_card = ApiServerCard(content)
         layout.addWidget(self.api_card)

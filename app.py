@@ -18,6 +18,9 @@ if project_root not in sys.path:
 from utils.atool import resource_path
 from utils import paths as _paths
 _paths.ensure_defaults()
+# 尽早应用代理配置 —— 让后续 subprocess_env / 主进程 urllib 都拿到正确的
+# HTTP_PROXY 等键;必须在任何网络活动(pip / hf 下载 / LLM chat)之前
+_paths.apply_proxy_env()
 current_path = os.environ.get("PATH", "")
 ffmpeg_path = resource_path(os.path.join("resource", "ffmepg", "bin"))
 if ffmpeg_path not in current_path:
@@ -56,7 +59,7 @@ threading.excepthook = lambda args: global_exception_hook(
 
 
 
-from PyQt6.QtGui import QFontDatabase, QFont
+from PyQt6.QtGui import QFontDatabase, QFont, QIcon
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QWidget, QHBoxLayout, QVBoxLayout
 from qfluentwidgets import (NavigationItemPosition, setTheme, Theme, FluentWindow,
@@ -331,6 +334,21 @@ def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    # 应用图标 —— Windows 任务栏 / Alt+Tab / 打包 exe 后的窗口左上角都吃这个。
+    # setWindowIcon 走 app 级默认,单独窗口无需再设。ICO 里塞了 16~256 六档,
+    # 任务栏挑 32/48,标题栏挑 16。
+    _icon_path = resource_path(os.path.join("resource", "icon.ico"))
+    if os.path.isfile(_icon_path):
+        app.setWindowIcon(QIcon(_icon_path))
+    # Windows 下,让任务栏识别成独立应用(而不是继承 python.exe 的图标) ——
+    # 必须在 QApplication 创建后、任何窗口 show 之前设 AppUserModelID。
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "LaunchAI.Singularity.1")
+        except Exception:
+            pass
     setTheme(Theme.DARK)
     font_id = QFontDatabase.addApplicationFont(
         resource_path(os.path.join("resource", "JetBrainsMapleMono-BoldItalic.ttf")))

@@ -110,6 +110,12 @@ def subprocess_env(*, torch_home: Optional[str] = None,
     """
     返回 os.environ.copy() 后注入指定缓存环境变量的字典，
     供 subprocess.Popen(..., env=...) 使用。
+
+    如果 configs/config.json.proxy.enabled 为 true，还会把
+    HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY(大小写各一份)注入。
+    apply_proxy_env() 已在 app 启动时把这些写进当前进程的 os.environ,
+    这里再显式合并一次是防御措施:防止调用方在启动前构造 env、或代理开关
+    被临时改动后 os.environ 里的键被清理但父环境残留。
     """
     env = os.environ.copy()
     if torch_home:
@@ -117,7 +123,78 @@ def subprocess_env(*, torch_home: Optional[str] = None,
     if hf_home:
         env["HF_HOME"] = hf_home
         env["HUGGINGFACE_HUB_CACHE"] = hf_home
+    px = _proxy_env_dict()
+    if px:
+        env.update(px)
+    else:
+        # 代理被关掉时,把父环境残留的键也剔除(否则子进程还会走系统代理)
+        for k in _PROXY_ENV_KEYS:
+            env.pop(k, None)
     return env
+
+
+# 代理相关环境变量键 —— urllib/requests/curl 各自读的键集合。都写一遍,
+# 大小写各一份避免第三方库大小写敏感差异导致漏读(requests 优先小写,urllib 都读)。
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+)
+
+
+def _proxy_env_dict() -> dict:
+    """按 configs/config.json.proxy 生成一份准备写入 env 的代理键值对。
+    未启用/未填 URL 就返回 {},让调用方按"关闭"路径处理。"""
+    # 延迟 import 避免在 configer 加载完前调用出问题
+    from utils.configer import get_field
+    cfg = get_field("proxy", {}) or {}
+    if not cfg.get("enabled"):
+        return {}
+    url = (cfg.get("url") or "").strip()
+    if not url:
+        return {}
+    no_proxy = (cfg.get("no_proxy") or
+                "127.0.0.1,localhost,0.0.0.0,::1").strip()
+    d = {}
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+              "http_proxy", "https_proxy", "all_proxy"):
+        d[k] = url
+    d["NO_PROXY"] = no_proxy
+    d["no_proxy"] = no_proxy
+    return d
+
+
+def apply_proxy_env() -> None:
+    """按当前 config 把代理写入 os.environ,并重装 urllib 默认 opener。
+
+    - 启用: 8 个大小写变体都写,同时 urllib.install_opener 装上 ProxyHandler
+      让 in-process 的 urlopen (LLM chat 的流式请求)立即走代理
+    - 禁用: 把 _PROXY_ENV_KEYS 全部从 os.environ 剔除(否则残留会让子进程仍
+      走系统代理),urllib 也换成空 ProxyHandler,显式绕过环境变量
+
+    settings 卡切开关时调这一下即可,不需要重启。
+    """
+    active = _proxy_env_dict()
+    if active:
+        for k, v in active.items():
+            os.environ[k] = v
+    else:
+        for k in _PROXY_ENV_KEYS:
+            os.environ.pop(k, None)
+    # 立即让 urllib 默认 opener 拿到新配置。urlopen(req) 走的是 install_opener
+    # 设置的 opener;若不显式重装,Python 只会在第一次调用时 snapshot 一次 env。
+    try:
+        import urllib.request
+        if active:
+            handler = urllib.request.ProxyHandler(
+                {"http": active["HTTP_PROXY"],
+                 "https": active["HTTPS_PROXY"]})
+        else:
+            # 空 dict 表示"显式不用代理",而不是"从 env 读"
+            handler = urllib.request.ProxyHandler({})
+        urllib.request.install_opener(urllib.request.build_opener(handler))
+    except Exception:
+        # 装 opener 失败不影响子进程路径,不硬中断
+        pass
 
 
 def apply_inproc_env(*, xdg: Optional[str] = None,
